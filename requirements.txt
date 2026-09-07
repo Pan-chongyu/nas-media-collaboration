@@ -1,2 +1,4 @@
-# 运行时仅依赖 Python 标准库。
-# 构建安装包时可选安装 pyinstaller：python -m pip install pyinstaller
+# 运行时依赖
+Pillow==12.3.0
+# 构建工具由 build.ps1 自动安装
+# pyinstaller==6.22.2
