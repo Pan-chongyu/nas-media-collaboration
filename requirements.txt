@@ -1,0 +1,2 @@
+# 运行时仅依赖 Python 标准库。
+# 构建安装包时可选安装 pyinstaller：python -m pip install pyinstaller
