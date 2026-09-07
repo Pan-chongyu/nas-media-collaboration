@@ -20,6 +20,10 @@ def find_ffplay(base: Path | None = None) -> Path | None:
     candidates = []
     if base:
         candidates.append(Path(base) / "bin" / "ffplay.exe")
+    meipass = getattr(__import__("sys"), "_MEIPASS", None)
+    if meipass:
+        candidates.extend((Path(meipass) / "tools" / "ffplay.exe", Path(meipass) / "ffplay.exe"))
+    candidates.append(Path(__file__).resolve().parent / "tools" / "ffplay.exe")
     candidates.append(Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "ffmpeg" / "bin" / "ffplay.exe")
     found = shutil.which("ffplay")
     if found:
@@ -96,9 +100,8 @@ class MediaPlayer:
         return max(0.0, end - self.started_at - self.elapsed_before_pause)
 
     def seek(self, seconds: int) -> None:
-        if seconds == 0:
-            return
-        self._send("\033")
+        if seconds:
+            self._send("\033")
 
     def set_volume(self, value: int) -> None:
         self.volume = max(0, min(100, int(value)))

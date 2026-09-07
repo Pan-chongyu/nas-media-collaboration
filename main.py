@@ -26,7 +26,7 @@ from player import MediaPlayer, PlayerError
 
 
 APP_NAME = "素材协作"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 DEFAULT_ROOT = r"\\SmartStorage\新媒体-137964276\素材库"
 DEFAULT_SYNC_ROOT = r"\\SmartStorage\新媒体-137964276\素材协作数据"
 DEFAULT_PUBLISH_ROOT = r"\\SmartStorage\新媒体-137964276\软件库\素材协作"
@@ -258,6 +258,13 @@ class Workspace(tk.Tk):
         self.stop_button.pack(side="left", padx=4)
         self.fullscreen_button = ttk.Button(player_bar, text="全屏", command=self._fullscreen_player)
         self.fullscreen_button.pack(side="right")
+        self.player_progress = tk.DoubleVar(value=0.0)
+        self.player_progress_scale = ttk.Scale(preview, from_=0, to=100, variable=self.player_progress,
+                                               command=self._player_progress_changed)
+        self.player_progress_scale.pack(fill="x", pady=(0, 4))
+        self.player_progress_scale.state(["disabled"])
+        self.player_elapsed = ttk.Label(preview, text="00:00 / --:--", style="Muted.TLabel")
+        self.player_elapsed.pack(anchor="e", pady=(0, 4))
         self.player_volume = tk.IntVar(value=80)
         ttk.Scale(preview, from_=0, to=100, variable=self.player_volume, command=self._set_player_volume).pack(fill="x", pady=(0, 10))
         self.player_hint = ttk.Label(preview, text="选择视频或音频后播放", style="Muted.TLabel")
@@ -558,15 +565,43 @@ class Workspace(tk.Tk):
             self._status.set(str(exc))
 
     def _player_tick(self):
+        elapsed = self.player.elapsed
+        self.player_progress.set(min(100.0, elapsed / max(1.0, self._player_duration_seconds()) * 100.0))
+        if hasattr(self, "player_elapsed"):
+            self.player_elapsed.configure(text=f"{self._format_clock(elapsed)} / {self._selected_duration()}")
         if self.player.playing:
             self.after(500, self._player_tick)
         else:
             self.play_button.configure(text="▶ 播放")
 
+    def _format_clock(self, seconds):
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def _selected_duration(self):
+        item = self._selected()
+        value = str(item.get("duration", "")) if item else ""
+        return value[-5:] if len(value) >= 5 else "--:--"
+
+    def _player_duration_seconds(self):
+        value = self._selected_duration()
+        try:
+            minutes, seconds = value.split(":")[-2:]
+            return int(minutes) * 60 + int(seconds)
+        except (ValueError, AttributeError):
+            return 0
+
+    def _player_progress_changed(self, _value=None):
+        # ffplay is intentionally kept local and isolated; the slider reflects
+        # elapsed playback without sending unsafe filesystem operations.
+        return None
+
     def _stop_player(self):
         self.player.stop()
         if hasattr(self, "play_button"):
             self.play_button.configure(text="▶ 播放")
+            self.player_progress.set(0)
+            self.player_elapsed.configure(text="00:00 / --:--")
 
     def _set_player_volume(self, value):
         try:

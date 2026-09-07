@@ -1,9 +1,9 @@
 #define MyAppName "素材协作"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.3.1"
 #endif
 #ifndef AppSourceDir
-  #define AppSourceDir "..\build\0.3.0\dist\素材协作"
+  #define AppSourceDir "..\build\0.3.1\dist\素材协作-0.3.1"
 #endif
 #define MyAppPublisher "素材协作"
 #define MyAppExeName "素材协作.exe"
