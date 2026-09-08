@@ -33,7 +33,7 @@ if result.returncode:
     raise SystemExit(result.returncode)
 report = json.loads(out.read_text(encoding="utf-8"))
 if arguments.collaboration:
-    assert report["ok"] and len(report["checks"]) == 5 and report["dnd"], report
+    assert report["ok"] and len(report["checks"]) == 9 and report["dnd"], report
 elif arguments.player:
     assert report["ok"] and report["closed"], report
     assert len(report["checks"]) == 7, report

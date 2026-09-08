@@ -214,6 +214,56 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.app.service.collaboration.get(editor.result["entity_id"])["asset_ids"], [asset["asset_id"]])
         editor.close()
 
+    def test_category_filter_batch_assignment_and_uncategorized_preview(self):
+        category = self.app.service.categories.save({"name": "采访", "color": "#087f72"})
+        self.app._request_categories()
+        self._pump_until(lambda: len(self.app.category_records) == 1)
+        self.app._toggle_batch()
+        self.app._check_page()
+        chosen = {item["asset_id"] for item in self.app.records}
+        self.assertEqual(self.app.checked_ids, chosen)
+        dialog = self.app._assign_categories()
+        self._pump_until(lambda: len(dialog.records) == 1)
+        dialog.checked.add(category["category_id"])
+        dialog.apply()
+        self._pump_until(lambda: not dialog.saving and all(item.get("categories") for item in self.app.records))
+        dialog.close()
+        self.app._turn_page(1)
+        self._pump_until(lambda: self.app.page_number == 1 and len(self.app.records) == self.count - PAGE_SIZE)
+        self.assertFalse(self.app.checked_ids)
+        self.app.category_var.set(next(label for label, identity in self.app.category_choices.items() if identity == category["category_id"]))
+        self.app._category_selected()
+        self._pump_until(lambda: self.app.page_number == 0 and self.app.total == PAGE_SIZE)
+        self.assertEqual({item["asset_id"] for item in self.app.records}, chosen)
+        self.app.category_var.set("未分类")
+        self.app._category_selected()
+        self._pump_until(lambda: self.app.total == self.count - PAGE_SIZE)
+        self.assertTrue(all(not item["categories"] for item in self.app.records))
+        identity = next(iter(chosen))
+        self.app.preview_asset_id(identity)
+        self._pump_until(lambda: self.app.selected_id == identity)
+        self.assertEqual(self.app.category_id, "")
+        self.assertIn("分类：采访", self.app.preview_meta.cget("text"))
+
+    def test_category_and_batch_controls_fit_small_window(self):
+        self.app.geometry("1024x700")
+        self.app._toggle_batch()
+        self._settle()
+        for widget in (self.app.category_selector, self.app.manage_categories_button, self.app.assign_category_button,
+                       self.app.batch_count, self.app.preview_actions, self.app.player_progress_scale, self.app.fullscreen_button):
+            self._assert_inside(widget, self.app)
+        for widget in (self.app.preview_actions, self.app.player_progress_scale, self.app.fullscreen_button):
+            self._assert_inside(widget, self.app.preview_panel)
+        self.assertEqual(len(self.app.batch_widgets), PAGE_SIZE)
+        first = self.app.records[0]["asset_id"]
+        self.app.batch_widgets[first].event_generate("<Button-1>")
+        self.assertEqual(self.app.checked_ids, {first})
+        self.app._set_view("list")
+        self._settle()
+        self.assertEqual(self.app.asset_tree.set(first, "pick"), "✓")
+        self.app._toggle_batch()
+        self.assertFalse(self.app.checked_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

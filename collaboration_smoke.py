@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import time
 import traceback
+import tkinter as tk
 
 from PIL import Image
 
@@ -23,7 +24,7 @@ def run_smoke(app, report_path: Path):
                               ensure_ascii=False, indent=2), encoding="utf-8")
         # Test fixtures must never wait on discard-draft prompts after a failed check.
         for child in list(app.winfo_children()):
-            if hasattr(child, "initial_data"):
+            if isinstance(child, tk.Toplevel):
                 child.destroy()
         app.close()
 
@@ -90,6 +91,39 @@ def run_smoke(app, report_path: Path):
                 state["step"] = 5
             elif step == 5 and app.active_page == "素材库" and app.selected_id == state["asset"]["asset_id"]:
                 checks.append("open_linked_material_preview")
+                manager = app._manage_categories()
+                manager.name_var.set("安装验证 · 门店")
+                manager.save()
+                state["manager"], state["step"] = manager, 6
+            elif step == 6 and state["manager"].record and not state["manager"].saving:
+                state["category"] = state["manager"].record
+                state["manager"].close()
+                checks.append("create_category")
+                app._toggle_batch()
+                app._check_page()
+                assert app.checked_ids == {state["asset"]["asset_id"]}
+                state["assignment"] = app._assign_categories()
+                state["step"] = 7
+            elif step == 7 and state["assignment"].records:
+                state["assignment"].checked.add(state["category"]["category_id"])
+                state["assignment"].apply()
+                state["step"] = 8
+            elif step == 8 and not state["assignment"].saving and app.records and app.records[0].get("categories"):
+                assert app.records[0]["categories"][0]["name"] == "安装验证 · 门店"
+                checks.append("batch_assign_category")
+                state["assignment"].close()
+                state["step"] = 9
+            elif step == 9 and state["category"]["category_id"] in app.category_choices.values():
+                app.category_var.set(next(label for label, identity in app.category_choices.items() if identity == state["category"]["category_id"]))
+                app._category_selected()
+                state["step"] = 10
+            elif step == 10 and app.total == 1 and app.category_id == state["category"]["category_id"] and app.records[0].get("categories"):
+                checks.append("filter_category")
+                app.category_var.set("未分类")
+                app._category_selected()
+                state["step"] = 11
+            elif step == 11 and app.total == 0:
+                checks.append("filter_uncategorized")
                 assert app.dnd_version
                 finish()
                 return

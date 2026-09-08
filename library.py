@@ -20,6 +20,7 @@ from indexer import (
 from media import generate_thumbnail
 from sync_events import Event, append_event, read_events
 from collaboration_store import CollaborationStore, ENTITY_TYPE as COLLABORATION_ENTITY_TYPE
+from category_store import CategoryStore, ENTITY_TYPES as CATEGORY_ENTITY_TYPES
 
 
 def utc_now() -> str:
@@ -84,6 +85,37 @@ class LibraryService:
                 self._state(db, replay_key, utc_now())
             db.commit()
         self.collaboration = CollaborationStore(self.db_path, key, device_id)
+        self.categories = CategoryStore(self.db_path, key, device_id)
+        with closing(open_index(self.db_path)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            replay_key = f"category_inbox_v1:{key}"
+            if not db.execute("SELECT 1 FROM app_state WHERE key=?", (replay_key,)).fetchone():
+                # 0.4 clients acknowledged unsupported category events. Recover
+                # their retained payloads even offline, and replay the old inbox
+                # once to recover events previously rejected without a payload.
+                db.execute("DELETE FROM inbox WHERE library_key=?", (key,))
+                rows = db.execute("SELECT * FROM unsupported_events WHERE library_key=?", (key,)).fetchall()
+                for row in rows:
+                    try:
+                        event = Event.from_dict(json.loads(row["event_json"]))
+                    except (ValueError, TypeError):
+                        continue
+                    if event.entity_type not in CATEGORY_ENTITY_TYPES:
+                        continue
+                    # A failed replay must not commit partial membership rows.
+                    db.execute("SAVEPOINT replay_category")
+                    try:
+                        self.categories.apply_event(event, db=db)
+                    except (ValueError, TypeError) as exc:
+                        db.execute("ROLLBACK TO replay_category")
+                        db.execute("INSERT OR REPLACE INTO rejected_events VALUES(?,?,?)", (event.event_id, str(exc), utc_now()))
+                    else:
+                        db.execute("DELETE FROM unsupported_events WHERE library_key=? AND event_id=?", (key, event.event_id))
+                        db.execute("DELETE FROM rejected_events WHERE event_id=?", (event.event_id,))
+                    finally:
+                        db.execute("RELEASE replay_category")
+                    db.execute("INSERT OR IGNORE INTO inbox VALUES(?,?,?)", (key, event.event_id, utc_now()))
+                self._state(db, replay_key, utc_now())
 
     def _state(self, db, key: str, value: str) -> None:
         db.execute("INSERT INTO app_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
@@ -100,16 +132,21 @@ class LibraryService:
             )
             return state
 
-    def page(self, query: str = "", media_type: str | None = None, offset: int = 0, limit: int = 30) -> tuple[list[dict], int]:
+    def page(self, query: str = "", media_type: str | None = None, offset: int = 0, limit: int = 30, category_id: str = "") -> tuple[list[dict], int]:
+        if not isinstance(category_id, str):
+            raise ValueError("分类筛选参数不正确")
         with closing(open_index(self.db_path)) as db:
-            count = count_records(db, query, root=self.root, media_type=media_type)
-            records = load_records(db, query, root=self.root, media_type=media_type, offset=offset, limit=limit)
+            db.execute("BEGIN")
+            count = count_records(db, query, root=self.root, media_type=media_type, category_id=category_id)
+            records = load_records(db, query, root=self.root, media_type=media_type, offset=offset, limit=limit, category_id=category_id)
+            categories = self.categories.for_assets([record.asset_id for record in records], db=db)
             items = []
             for record in records:
                 item = asdict(record)
                 thumb = db.execute("SELECT cache_path,status,file_hash FROM thumbnails WHERE asset_id=?", (record.asset_id,)).fetchone()
                 item["thumbnail"] = thumb["cache_path"] if thumb and thumb["file_hash"] == record.file_hash else ""
                 item["thumbnail_status"] = thumb["status"] if thumb and thumb["file_hash"] == record.file_hash else "pending"
+                item["categories"] = categories[record.asset_id]
                 items.append(item)
             return items, count
 
@@ -295,6 +332,7 @@ class LibraryService:
                     records = []
                     remaining, retry_error = [], ""
                     collaboration = event.entity_type == COLLABORATION_ENTITY_TYPE and event.payload.get("library_key") == key
+                    category = event.entity_type in CATEGORY_ENTITY_TYPES and event.payload.get("library_key") == key
                     supported_asset = event.entity_type == "asset_batch" and event.operation == "upsert" and event.payload.get("library_key") == key
                     try:
                         if supported_asset:
@@ -305,11 +343,16 @@ class LibraryService:
                         with db:
                             db.execute("BEGIN IMMEDIATE")
                             applied_metadata = self.collaboration.apply_event(event, db=db) if collaboration else False
+                            if category:
+                                applied_metadata = self.categories.apply_event(event, db=db)
                             applied_assets = upsert_records(db, records, commit=False)
                             self._defer(db, key, event.event_id, remaining, retry_error)
-                            if not collaboration and not supported_asset and event.payload.get("library_key") == key:
+                            if not collaboration and not category and not supported_asset and event.payload.get("library_key") == key:
                                 db.execute("INSERT OR IGNORE INTO unsupported_events VALUES(?,?,?,?)",
                                            (key, event.event_id, json.dumps(event.to_dict(), ensure_ascii=False), utc_now()))
+                            elif category:
+                                db.execute("DELETE FROM unsupported_events WHERE library_key=? AND event_id=?", (key, event.event_id))
+                                db.execute("DELETE FROM rejected_events WHERE event_id=?", (event.event_id,))
                             db.execute("INSERT OR IGNORE INTO inbox VALUES(?,?,?)", (key, event.event_id, utc_now()))
                         changed += applied_assets
                         metadata_changed += int(applied_metadata)

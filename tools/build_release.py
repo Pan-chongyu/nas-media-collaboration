@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--publish", type=Path)
-    parser.add_argument("--notes", default="新增脚本与工单、素材绑定和关联预览；多人版本同步与冲突处理；支持素材文件拖出到剪辑软件")
+    parser.add_argument("--notes", default="新增彩色素材分类、多分类标签、未分类筛选和本页批量整理；支持分类归档恢复及多人同步")
     parser.add_argument("--publish-only", action="store_true")
     args = parser.parse_args()
     match = re.search(r'^APP_VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "main.py").read_text(encoding="utf-8"), re.M)

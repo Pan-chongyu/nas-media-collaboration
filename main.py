@@ -28,7 +28,7 @@ from file_transfer import DragDropRoot, register_file_drag
 
 
 APP_NAME = "素材协作"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 DEFAULT_ROOT = r"\\SmartStorage\新媒体-137964276\素材库"
 DEFAULT_SYNC_ROOT = r"\\SmartStorage\新媒体-137964276\素材协作数据"
 DEFAULT_PUBLISH_ROOT = r"\\SmartStorage\新媒体-137964276\软件库\素材协作"
@@ -125,6 +125,12 @@ class Workspace(DragDropRoot):
         self.page_number = 0
         self.query_generation = 0
         self.selected_id = ""
+        self.category_id = ""
+        self.category_records = []
+        self._category_generation = 0
+        self.batch_mode = False
+        self.checked_ids = set()
+        self.batch_widgets = {}
         self.view_mode = "grid"
         self.columns = 0
         self.card_width = 230
@@ -224,6 +230,9 @@ class Workspace(DragDropRoot):
         self.image_refs.clear()
         self.thumb_widgets.clear()
         self.card_widgets.clear()
+        self.batch_widgets.clear()
+        self.checked_ids.clear()
+        self.batch_mode = False
         self.collaboration_page = None
         for child in self.page.winfo_children():
             child.destroy()
@@ -278,6 +287,7 @@ class Workspace(DragDropRoot):
         ttk.Button(toolbar, text="批量缩略图", style="Compact.TButton", command=self._batch_thumbnails).pack(side="left")
         self.autoplay_preview = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="点选即播", variable=self.autoplay_preview).pack(side="right")
+        self._build_category_bar()
         self.work_split = tk.PanedWindow(self.page, orient="horizontal", sashwidth=12, sashrelief="flat", sashcursor="sb_h_double_arrow", bg=BG, bd=0, opaqueresize=True)
         self.work_split.pack(fill="both", expand=True)
         self.library_surface = ttk.Frame(self.work_split)
@@ -368,15 +378,16 @@ class Workspace(DragDropRoot):
         self.asset_window = self.asset_canvas.create_window((0, 0), window=self.asset_grid, anchor="nw")
         self.asset_grid.bind("<Configure>", lambda _event: self.asset_canvas.configure(scrollregion=self.asset_canvas.bbox("all")))
         self.asset_canvas.bind("<Configure>", self._canvas_resize)
-        self.asset_tree = ttk.Treeview(self.library_surface, columns=("name", "type", "size", "status"), show="tree headings", selectmode="browse")
+        self.asset_tree = ttk.Treeview(self.library_surface, columns=("pick", "name", "type", "size", "categories", "status"), displaycolumns=("name", "type", "size", "categories", "status"), show="tree headings", selectmode="browse")
         self.asset_tree.configure(yscrollcommand=self.asset_scrollbar.set, xscrollcommand=self.asset_horizontal.set)
         self.asset_horizontal.configure(command=self.asset_tree.xview)
         self.asset_tree.heading("#0", text="")
         self.asset_tree.column("#0", width=72, minwidth=72, stretch=False)
-        for name, label, width in (("name", "名称", 250), ("type", "类型", 60), ("size", "大小", 85), ("status", "缩略图", 80)):
+        for name, label, width in (("pick", "选择", 44), ("name", "名称", 250), ("type", "类型", 60), ("size", "大小", 85), ("categories", "分类", 150), ("status", "缩略图", 80)):
             self.asset_tree.heading(name, text=label)
             self.asset_tree.column(name, width=width, minwidth=width if name != "name" else 140, stretch=name == "name")
         self.asset_tree.bind("<<TreeviewSelect>>", self._list_selection)
+        self.asset_tree.bind("<Button-1>", self._list_batch_click, add="+")
         self.asset_tree.bind("<Double-1>", lambda _event: self._play_asset(self.selected_id))
         register_file_drag(self.asset_tree, self._tree_drag_paths, started=self._drag_started, finished=self._drag_finished)
         bottom = ttk.Frame(self.page)
@@ -391,6 +402,116 @@ class Workspace(DragDropRoot):
         self._empty_preview()
         self._set_view(self.view_mode)
         self._request_page()
+        self._request_categories()
+
+    def _build_category_bar(self):
+        bar = self.category_bar = ttk.Frame(self.page)
+        bar.pack(fill="x", pady=(0, 10))
+        bar.columnconfigure(1, weight=1)
+        ttk.Label(bar, text="素材分类", style="Muted.TLabel").grid(row=0, column=0, padx=(0, 10))
+        self.category_var = tk.StringVar(value="全部分类")
+        self.category_choices = {"全部分类": "", "未分类": "__uncategorized__"}
+        self.category_selector = ttk.Combobox(bar, textvariable=self.category_var, values=tuple(self.category_choices), state="readonly", width=20)
+        self.category_selector.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.category_selector.bind("<<ComboboxSelected>>", self._category_selected)
+        self.manage_categories_button = ttk.Button(bar, text="管理分类", style="Compact.TButton", command=self._manage_categories)
+        self.manage_categories_button.grid(row=0, column=2, padx=(0, 8))
+        self.batch_toggle = ttk.Button(bar, text="批量整理", style="Compact.TButton", command=self._toggle_batch)
+        self.batch_toggle.grid(row=0, column=3, padx=(0, 8))
+        self.assign_category_button = ttk.Button(bar, text="设置分类", style="Primary.TButton", command=self._assign_categories)
+        self.assign_category_button.grid(row=0, column=4)
+        self.batch_bar = ttk.Frame(bar)
+        self.batch_bar.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        ttk.Button(self.batch_bar, text="全选本页", style="Compact.TButton", command=self._check_page).pack(side="left")
+        ttk.Button(self.batch_bar, text="清空勾选", style="Compact.TButton", command=self._clear_checks).pack(side="left", padx=7)
+        self.batch_count = ttk.Label(self.batch_bar, text="已勾选 0 个", style="Muted.TLabel")
+        self.batch_count.pack(side="left")
+        ttk.Label(self.batch_bar, text="切换筛选或翻页会清空勾选", style="Muted.TLabel").pack(side="right")
+        self.batch_bar.grid_remove()
+
+    def _request_categories(self):
+        if self.active_page != "素材库":
+            return
+        self._category_generation += 1
+        generation, service = self._category_generation, self.service
+        self._background("categories", lambda: (generation, service, service.categories.list_records()))
+
+    def _category_selected(self, _event=None):
+        self.category_id = self.category_choices.get(self.category_var.get(), "")
+        self._clear_checks()
+        self._request_page(reset=True)
+
+    def _categories_changed(self, service):
+        if service is self.service:
+            self._request_categories()
+            self._request_page()
+            self._request_overview()
+
+    def _manage_categories(self):
+        from category_ui import CategoryManager
+        service = self.service
+        return CategoryManager(self, on_changed=lambda: self._categories_changed(service))
+
+    def _assign_categories(self):
+        from category_ui import CategoryAssignmentDialog
+        identities = sorted(self.checked_ids) if self.batch_mode else ([self.selected_id] if self._selected() else [])
+        if not identities:
+            self._status.set("请先勾选素材" if self.batch_mode else "请先选择一个素材")
+            return
+        service = self.service
+        return CategoryAssignmentDialog(self, identities, on_changed=lambda: self._categories_changed(service))
+
+    def _toggle_batch(self):
+        self.batch_mode = not self.batch_mode
+        self.checked_ids.clear()
+        self.batch_toggle.configure(text="退出批量" if self.batch_mode else "批量整理")
+        self.assign_category_button.configure(text="批量分类" if self.batch_mode else "设置分类")
+        if self.batch_mode:
+            self.batch_bar.grid()
+        else:
+            self.batch_bar.grid_remove()
+        self.asset_tree.configure(displaycolumns=("pick", "name", "type", "size", "categories", "status") if self.batch_mode else ("name", "type", "size", "categories", "status"))
+        self._render_current()
+        self._refresh_checks()
+
+    def _check_page(self):
+        self.checked_ids = {item["asset_id"] for item in self.records}
+        self._refresh_checks()
+
+    def _clear_checks(self):
+        self.checked_ids.clear()
+        if self.active_page == "素材库" and hasattr(self, "batch_count"):
+            self._refresh_checks()
+
+    def _toggle_checked(self, identity):
+        if identity in self.checked_ids:
+            self.checked_ids.remove(identity)
+        else:
+            self.checked_ids.add(identity)
+        self._refresh_checks()
+
+    def _refresh_checks(self):
+        self.batch_count.configure(text=f"已勾选 {len(self.checked_ids)} / 本页 {len(self.records)} 个")
+        for identity, widget in self.batch_widgets.items():
+            selected = identity in self.checked_ids
+            widget.configure(text="✓" if selected else "□", bg=ACCENT if selected else "#ffffff", fg="white" if selected else FG)
+        if hasattr(self, "asset_tree"):
+            for identity in self.asset_tree.get_children():
+                self.asset_tree.set(identity, "pick", "✓" if identity in self.checked_ids else "□")
+
+    def _card_click(self, event, identity):
+        self.focus_set()
+        if self.batch_mode and event.state & 0x0004:
+            self._toggle_checked(identity)
+        else:
+            self._select(identity)
+
+    def _list_batch_click(self, event):
+        if self.batch_mode and self.asset_tree.identify_column(event.x) == "#1":
+            identity = self.asset_tree.identify_row(event.y)
+            if identity:
+                self._toggle_checked(identity)
+                return "break"
 
 
     def _tooltip(self, widget, text):
@@ -452,6 +573,7 @@ class Workspace(DragDropRoot):
     def _preview_panel_resized(self, event):
         item = self._selected()
         width = max(220, event.width - 36)
+        self.preview_panel.rowconfigure(2, minsize=90 if event.height < 430 else 140)
         self.preview_title.configure(text=self._fit_text(item["name"], width, 1, self.preview_font) if item else "选择一个素材开始")
         self.preview_meta.configure(wraplength=width)
         if event.height < 500:
@@ -549,6 +671,8 @@ class Workspace(DragDropRoot):
         self.thumb_widgets.clear()
         self.card_shapes.clear()
         self.card_badges.clear()
+        self.batch_widgets.clear()
+        self.checked_ids.intersection_update(item["asset_id"] for item in self.records)
         for child in self.asset_grid.winfo_children():
             child.destroy()
         self.asset_tree.delete(*self.asset_tree.get_children())
@@ -564,12 +688,12 @@ class Workspace(DragDropRoot):
         for index, item in enumerate(self.records):
             asset_id = item["asset_id"]
             if self.view_mode == "list":
-                self.asset_tree.insert("", "end", iid=asset_id, values=(item["name"], TYPE_NAMES.get(item["media_type"], "文件"), readable_size(item["size"]), STATUS_NAMES.get(item["thumbnail_status"], "")))
+                self.asset_tree.insert("", "end", iid=asset_id, values=("✓" if asset_id in self.checked_ids else "□", item["name"], TYPE_NAMES.get(item["media_type"], "文件"), readable_size(item["size"]), "、".join(category["name"] for category in item.get("categories", [])) or "未分类", STATUS_NAMES.get(item["thumbnail_status"], "")))
                 self.card_shapes[asset_id] = (64, 36)
             else:
                 width = self.card_width
                 height = round(width * 9 / 16)
-                frame = tk.Frame(self.asset_grid, bg="white", width=width, height=height + 68,
+                frame = tk.Frame(self.asset_grid, bg="white", width=width, height=height + 91,
                                  highlightthickness=2, highlightbackground=ACCENT if asset_id == self.selected_id else "#e0e6ec", cursor="hand2")
                 frame.grid(row=index // max(self.columns, 1), column=index % max(self.columns, 1), padx=5, pady=6, sticky="n")
                 frame.pack_propagate(False)
@@ -586,10 +710,24 @@ class Workspace(DragDropRoot):
                                  bg=ACCENT if asset_id == self.selected_id else "#233449", fg="white", font=("Microsoft YaHei UI", 8), padx=7, pady=2)
                 badge.place(x=8, y=8)
                 self.card_badges[asset_id] = badge
-                for widget in (frame, label, title, meta, badge):
-                    widget.bind("<Button-1>", lambda _event, identity=asset_id: (self.focus_set(), self._select(identity)))
+                categories = item.get("categories", [])
+                category_text = categories[0]["name"] + (f"  +{len(categories) - 1}" if len(categories) > 1 else "") if categories else "未分类"
+                category_tag = tk.Label(frame, text=self._fit_text(category_text, width - 26, 1, self.card_font),
+                                        bg="#eef3f6", fg=categories[0]["color"] if categories else MUTED,
+                                        font=("Microsoft YaHei UI", 8), padx=5, pady=1, anchor="w")
+                category_tag.pack(anchor="w", padx=10, pady=(3, 4))
+                self._tooltip(category_tag, "、".join(category["name"] for category in categories) or "尚未设置分类")
+                for widget in (frame, label, title, meta, badge, category_tag):
+                    widget.bind("<Button-1>", lambda event, identity=asset_id: self._card_click(event, identity))
                     widget.bind("<Double-1>", lambda _event, identity=asset_id: self._play_asset(identity))
                     register_file_drag(widget, lambda _event, record=item: [record["path"]], started=self._drag_started, finished=self._drag_finished)
+                if self.batch_mode:
+                    check = tk.Label(label, text="✓" if asset_id in self.checked_ids else "□", cursor="hand2",
+                                     bg=ACCENT if asset_id in self.checked_ids else "white", fg="white" if asset_id in self.checked_ids else FG,
+                                     font=("Segoe UI", 12, "bold"), width=2, bd=0)
+                    check.place(relx=1, x=-8, y=8, anchor="ne")
+                    check.bind("<Button-1>", lambda event, identity=asset_id: (self._toggle_checked(identity), "break")[-1])
+                    self.batch_widgets[asset_id] = check
                 self.thumb_widgets[asset_id] = label
                 self.card_widgets[asset_id] = frame
                 self.card_shapes[asset_id] = (width - 4, height)
@@ -604,6 +742,7 @@ class Workspace(DragDropRoot):
         self.page_label.configure(text=f"{self.page_number + 1} / {pages} 页")
         self.previous_button.configure(state="normal" if self.page_number else "disabled")
         self.next_button.configure(state="normal" if self.page_number + 1 < pages else "disabled")
+        self._refresh_checks()
 
     def _show_thumbnail(self, item, path):
         identity = item["asset_id"]
@@ -700,7 +839,8 @@ class Workspace(DragDropRoot):
         self.preview_title.configure(text=self._fit_text(item["name"], max(240, self.preview_panel.winfo_width() - 36), 1, self.preview_font))
         self._tooltip(self.preview_title, item["relative_path"])
         timestamp = datetime.fromtimestamp(item["mtime_ns"] / 1_000_000_000).strftime("%Y-%m-%d %H:%M")
-        self.preview_meta.configure(text=f"{TYPE_NAMES.get(item['media_type'], '文件')}   ·   {readable_size(item['size'])}   ·   {timestamp}\n{item['relative_path']}")
+        category_names = "、".join(category["name"] for category in item.get("categories", [])) or "未分类"
+        self.preview_meta.configure(text=f"{TYPE_NAMES.get(item['media_type'], '文件')}   ·   {readable_size(item['size'])}   ·   {timestamp}\n分类：{self._fit_text(category_names, max(240, self.preview_panel.winfo_width() - 40), 1, self.card_font)}\n{item['relative_path']}")
         index = next(i for i, record in enumerate(self.records) if record["asset_id"] == identity)
         self.preview_position.configure(text=f"{self.page_number * PAGE_SIZE + index + 1:02d} / {self.total:,}")
         self.previous_asset_button.configure(state="normal" if index > 0 or self.page_number > 0 else "disabled")
@@ -733,6 +873,8 @@ class Workspace(DragDropRoot):
 
     def _tree_drag_paths(self, event):
         identity = self.asset_tree.identify_row(event.y_root - self.asset_tree.winfo_rooty())
+        if self.batch_mode and identity in self.checked_ids:
+            return [record["path"] for record in self.records if record["asset_id"] in self.checked_ids]
         item = next((record for record in self.records if record["asset_id"] == identity), None)
         if item:
             self.asset_tree.selection_set(identity)
@@ -962,15 +1104,18 @@ class Workspace(DragDropRoot):
             return
         if reset:
             self.page_number = 0
+            self._clear_checks()
         self.query_generation += 1
         generation = self.query_generation
         query = self.search_var.get().strip()
         kind = next((key for key, value in TYPE_NAMES.items() if value == self.type_var.get()), None)
         offset = self.page_number * PAGE_SIZE
         service = self.service
-        self._background("page", lambda: (generation, service.page(query, kind, offset, PAGE_SIZE)))
+        category_id = self.category_id
+        self._background("page", lambda: (generation, service.page(query, kind, offset, PAGE_SIZE, category_id=category_id)))
 
     def _turn_page(self, difference):
+        self._clear_checks()
         self.page_number = max(0, self.page_number + difference)
         self._request_page()
         self.asset_canvas.yview_moveto(0)
@@ -982,6 +1127,7 @@ class Workspace(DragDropRoot):
     def _reload(self):
         self._reload_after = None
         self._request_page()
+        self._request_categories()
         if self.collaboration_page is not None:
             self.collaboration_page.refresh()
         self._request_overview()
@@ -1119,6 +1265,8 @@ class Workspace(DragDropRoot):
             messagebox.showerror(APP_NAME, str(exc))
             return
         self.settings, self.service = updated, service
+        self.category_id, self.category_records = "", []
+        self.checked_ids.clear()
         self.records, self.total, self.selected_id = [], 0, ""
         self.query_generation += 1
         self._node_status.set(updated["device_id"])
@@ -1176,6 +1324,11 @@ class Workspace(DragDropRoot):
             if kind == "page":
                 generation, (records, count) = value
                 if self.active_page == "素材库" and generation == self.query_generation:
+                    last_page = max(0, math.ceil(count / PAGE_SIZE) - 1)
+                    if self.page_number > last_page:
+                        self.page_number = last_page
+                        self._request_page()
+                        continue
                     self.records, self.total = records, count
                     self._render_current()
                     if self._pending_preview and self._pending_preview[0] == generation and self.records:
@@ -1188,6 +1341,7 @@ class Workspace(DragDropRoot):
             elif kind == "linked_asset":
                 service, record = value
                 if service is self.service:
+                    self.category_id = ""
                     self.show_page("素材库")
                     self._pending_asset_id = record.asset_id
                     self.search_var.set(record.relative_path)
@@ -1195,6 +1349,20 @@ class Workspace(DragDropRoot):
                         self.after_cancel(self._search_after)
                         self._search_after = None
                     self._request_page(reset=True)
+            elif kind == "categories":
+                generation, service, records = value
+                if service is self.service and generation == self._category_generation and self.active_page == "素材库":
+                    self.category_records = records
+                    self.category_choices = {"全部分类": "", "未分类": "__uncategorized__"}
+                    for record in records:
+                        suffix = f" · {record['category_id'][:8]}" if sum(item["name"] == record["name"] for item in records) > 1 or record["name"] in {"全部分类", "未分类"} else ""
+                        label = f"{record['name']}{suffix}  ({record['count']:,})" + (" ⚠" if record.get("conflict_count") else "")
+                        self.category_choices[label] = record["category_id"]
+                    if self.category_id not in self.category_choices.values():
+                        self.category_id = ""
+                        self._request_page(reset=True)
+                    self.category_selector.configure(values=tuple(self.category_choices))
+                    self.category_var.set(next(label for label, identity in self.category_choices.items() if identity == self.category_id))
             elif kind == "thumbnail":
                 service, result = value
                 if service is self.service and self.active_page == "素材库":
@@ -1232,6 +1400,10 @@ class Workspace(DragDropRoot):
                     self._status.set(f"同步：发出 {value['sent']} 批 / 收到 {value['received']} 批 / 更新 {value['changed']} 个素材 · {value.get('metadata_changed', 0)} 条协作版本")
                     if value["changed"]:
                         self._request_page()
+                    if value["received"] or value["changed"]:
+                        self._request_categories()
+                    if value.get("categories_changed") or value.get("category_changed") or value.get("metadata_changed"):
+                        self._request_page()
                     if self.collaboration_page is not None and value["received"]:
                         self.collaboration_page.refresh()
                 self._request_overview()
@@ -1267,8 +1439,14 @@ class Workspace(DragDropRoot):
         self.after(60, self._drain_messages)
 
     def close(self):
+        category_dialogs = [child for child in self.winfo_children() if isinstance(child, tk.Toplevel) and callable(getattr(child, "dirty", None))]
+        if any(child.saving for child in category_dialogs):
+            messagebox.showinfo(APP_NAME, "分类正在保存，请稍候再退出。", parent=self)
+            return
+        if any(child.dirty() for child in category_dialogs) and not messagebox.askyesno(APP_NAME, "分类编辑尚未保存。确定放弃修改并退出？", parent=self):
+            return
         editors = [child for child in self.winfo_children()
-                   if isinstance(child, tk.Toplevel) and hasattr(child, "initial_data")]
+                   if isinstance(child, tk.Toplevel) and hasattr(child, "initial_data") and not callable(getattr(child, "dirty", None))]
         if any(editor.saving for editor in editors):
             messagebox.showinfo(APP_NAME, "脚本或工单正在保存，请稍候再退出。", parent=self)
             return

@@ -181,7 +181,7 @@ def upsert_records(db, records: Iterable[AssetRecord], *, commit: bool = True) -
         raise
 
 
-def _filters(query="", root=None, media_type=None):
+def _filters(query="", root=None, media_type=None, category_id=""):
     where, args = [], []
     if root is not None:
         where.append("root_key=?")
@@ -193,6 +193,15 @@ def _filters(query="", root=None, media_type=None):
         query = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         where.append("(name LIKE ? ESCAPE '\\' OR relative_path LIKE ? ESCAPE '\\')")
         args.extend([f"%{query}%"] * 2)
+    if category_id:
+        membership = """SELECT 1 FROM category_memberships m JOIN category_entities c
+            ON c.library_key=m.library_key AND c.category_id=m.category_id
+            WHERE m.library_key=assets.root_key AND m.asset_id=assets.asset_id AND c.archived=0"""
+        if category_id == "__uncategorized__":
+            where.append("NOT EXISTS (" + membership + ")")
+        else:
+            where.append("EXISTS (" + membership + " AND c.category_id=?)")
+            args.append(category_id)
     return (" WHERE " + " AND ".join(where) if where else ""), args
 
 
@@ -200,14 +209,14 @@ def _from_row(row):
     return AssetRecord(**{field.name: row[field.name] for field in fields(AssetRecord)})
 
 
-def load_records(db, query="", *, root=None, limit=None, offset=0, media_type=None):
-    where, args = _filters(query, root, media_type)
+def load_records(db, query="", *, root=None, limit=None, offset=0, media_type=None, category_id=""):
+    where, args = _filters(query, root, media_type, category_id)
     sql = "SELECT * FROM assets" + where + " ORDER BY relative_path COLLATE NOCASE,asset_id LIMIT ? OFFSET ?"
     return [_from_row(row) for row in db.execute(sql, [*args, -1 if limit is None else max(0, limit), max(0, offset)])]
 
 
-def count_records(db, query="", *, root=None, media_type=None):
-    where, args = _filters(query, root, media_type)
+def count_records(db, query="", *, root=None, media_type=None, category_id=""):
+    where, args = _filters(query, root, media_type, category_id)
     return db.execute("SELECT count(*) FROM assets" + where, args).fetchone()[0]
 
 
