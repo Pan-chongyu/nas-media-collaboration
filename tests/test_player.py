@@ -156,11 +156,23 @@ class RealPlayerTests(unittest.TestCase):
             self.assertGreater(app.player_progress.get(), 0)
             app.play_button.invoke()
             until(lambda: app.player.state.paused and "继续" in app.play_button.cget("text"))
-            app._player_drag_start()
-            app.player_progress.set(50)
-            app._player_drag_end()
+            scale = app.player_progress_scale
+            scale.event_generate("<ButtonPress-1>", x=scale.winfo_width() // 2, y=13)
+            scale.event_generate("<ButtonRelease-1>", x=scale.winfo_width() // 2, y=13)
             until(lambda: abs(app.player.elapsed - 6) < 0.25)
             process = app.player.process
+            app.work_split.sash_place(0, max(250, app.work_split.winfo_width() // 2), 0)
+            until(lambda: app.player._video is not None)
+            self.assertIs(process, app.player.process)
+            # Search input keeps normal text entry; the preview shortcut does not intercept it.
+            from types import SimpleNamespace
+            from tkinter import ttk
+            entry = next(widget for widget in app.page.winfo_children()[1].winfo_children() if isinstance(widget, ttk.Entry))
+            entry.focus_force()
+            app.update()
+            app._preview_shortcut(SimpleNamespace(keysym="space"))
+            self.assertTrue(app.player.state.paused)
+            app.focus_force()
             app.fullscreen_button.invoke()
             until(lambda: bool(app._fullscreen) and app.player._video.parent == app.fullscreen_surface.winfo_id())
             self.assertIs(process, app.player.process)

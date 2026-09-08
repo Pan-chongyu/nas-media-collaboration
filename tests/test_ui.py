@@ -166,6 +166,9 @@ class WorkspaceTests(unittest.TestCase):
                 for widget in (self.app.page, self.app.library_surface, self.app.preview_image_label,
                                self.app.previous_button, self.app.next_button, self.app.page_label):
                     self._assert_inside(widget, self.app)
+                for widget in (self.app.play_button, self.app.player_progress_scale, self.app.fullscreen_button,
+                               self.app.preview_actions, self.app.previous_asset_button, self.app.next_asset_button):
+                    self._assert_inside(widget, self.app.preview_panel)
                 for frame in self.app.card_widgets.values():
                     self._assert_inside(frame, self.app.asset_canvas, vertical=False)
                 self.app._set_view("list")
@@ -180,6 +183,15 @@ class WorkspaceTests(unittest.TestCase):
                     self._assert_inside(widget, self.app)
                 self.app.show_page("素材库")
                 self._settle()
+
+    def test_continuous_preview_crosses_page_boundary(self):
+        self.app._select(self.app.records[-1]["asset_id"])
+        self.app._step_asset(1)
+        self._pump_until(lambda: self.app.page_number == 1 and self.app._pending_preview is None and self.app.selected_id in {r["asset_id"] for r in self.app.records})
+        self.assertEqual(self.app.selected_id, self.app.records[0]["asset_id"])
+        self.app._step_asset(-1)
+        self._pump_until(lambda: self.app.page_number == 0 and self.app._pending_preview is None and self.app.selected_id in {r["asset_id"] for r in self.app.records})
+        self.assertEqual(self.app.selected_id, self.app.records[-1]["asset_id"])
 
 
 if __name__ == "__main__":

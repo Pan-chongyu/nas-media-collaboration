@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--publish", type=Path)
-    parser.add_argument("--notes", default="右侧内置播放器、播放进度拖动及全屏切换；完整安装包")
+    parser.add_argument("--notes", default="全新素材预览界面：可调整大画面、清晰进度与音量、双击播放和连续预览")
     parser.add_argument("--publish-only", action="store_true")
     args = parser.parse_args()
     match = re.search(r'^APP_VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "main.py").read_text(encoding="utf-8"), re.M)

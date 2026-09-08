@@ -298,6 +298,8 @@ class MediaPlayer:
             for key, binding in (("ESC", "script-message nas-exit-fullscreen"),
                                  ("f", "script-message nas-toggle-fullscreen"),
                                  ("MBTN_LEFT_DBL", "script-message nas-toggle-fullscreen"),
+                                 ("LEFT", "seek -5 relative+exact"),
+                                 ("RIGHT", "seek 5 relative+exact"),
                                  ("SPACE", "cycle pause")):
                 ipc.send(["keybind", key, binding])
             ipc.send(["loadfile", str(source), "replace"])
