@@ -174,6 +174,10 @@ class CollaborationPage(_LocalJobs, ttk.Frame):
         self.history_button.pack(side="left", padx=7)
         self.archive_button = ttk.Button(actions, text="归档", command=self.archive_selected, state="disabled")
         self.archive_button.pack(side="left")
+        self.organize_button = None
+        if self.kind == "script":
+            self.organize_button = ttk.Button(actions, text="按脚本整理素材", command=self.organize_selected, state="disabled")
+            self.organize_button.pack(side="left", padx=7)
         ttk.Button(actions, text="刷新", command=self.refresh).pack(side="right")
         grid = ttk.Frame(self)
         grid.grid(row=3, column=0, sticky="nsew")
@@ -294,6 +298,8 @@ class CollaborationPage(_LocalJobs, ttk.Frame):
         self._selection_generation += 1
         generation = self._selection_generation
         record = self.selected_record()
+        if self.organize_button is not None:
+            self.organize_button.state(["!disabled"] if record and not record.get("archived") and not record.get("conflict_count") else ["disabled"])
         for button in (self.edit_button, self.history_button, self.archive_button):
             button.state(["!disabled"] if record else ["disabled"])
         self.bound_list.delete(0, "end")
@@ -332,6 +338,11 @@ class CollaborationPage(_LocalJobs, ttk.Frame):
         selection = self.bound_list.curselection()
         if selection:
             self.app.preview_asset_id(self._bound_ids[selection[0]])
+
+    def organize_selected(self):
+        record = self.selected_record()
+        if record and not record.get("archived") and not record.get("conflict_count"):
+            return self.app.open_organizer(record)
 
     def open_editor(self, record=None, asset_id=None, asset_name=""):
         editor = CollaborationEditor(self.app, self.service, self.kind, record=record,

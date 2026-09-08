@@ -366,56 +366,72 @@ class CategoryStore:
         self._apply(db, event)
         db.execute("INSERT INTO outbox VALUES(?,?,?,?)", (event.event_id, self.library_key, _json(event.to_dict()), payload["updated_at"]))
 
-    def save(self, data, category_id=None, expected_heads=None, resolve=False):
+    def save(self, data, category_id=None, expected_heads=None, resolve=False, db=None):
+        """Write atomically; optional db joins an existing caller-owned transaction."""
+        if db is not None:
+            if not db.in_transaction:
+                raise RuntimeError("写入必须在调用方事务中运行")
+            return self._save(db, data, category_id, expected_heads, resolve)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._save(connection, data, category_id, expected_heads, resolve)
+
+    def _save(self, db, data, category_id=None, expected_heads=None, resolve=False):
         if type(resolve) is not bool:
             raise ValueError("版本合并参数不正确")
         category_id = _identity(category_id) if category_id is not None else uuid.uuid4().hex
         expected = _heads(expected_heads) if expected_heads is not None else None
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            current = self._get(db, category_id)
-            heads = current["heads"] if current else []
-            if current and expected is None or expected is not None and expected != heads:
-                raise CategoryConflictError("分类已被修改，请保留草稿并重新载入最新版本")
-            if len(heads) > 1 and not resolve:
-                raise CategoryConflictError("分类存在并行版本，请查看各版本并合并保存")
-            if len(heads) > 1 and (not isinstance(data, dict) or set(data) != DATA_FIELDS):
-                raise ValueError("合并并行版本时必须提供完整分类内容")
-            value = _data(data, current)
-            if not value["archived"] and db.execute("SELECT 1 FROM category_entities WHERE library_key=? AND archived=0 AND name_key=? AND category_id<>? LIMIT 1",
-                (self.library_key, _name_key(value["name"]), category_id)).fetchone():
-                raise ValueError("已存在同名分类，请换一个名称")
-            payload = dict(schema=1, library_key=self.library_key, data=value, parents=heads,
-                           updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
-            self._publish(db, ENTITY_TYPE, category_id, payload)
-            return self._get(db, category_id)
+        current = self._get(db, category_id)
+        heads = current["heads"] if current else []
+        if current and expected is None or expected is not None and expected != heads:
+            raise CategoryConflictError("分类已被修改，请保留草稿并重新载入最新版本")
+        if len(heads) > 1 and not resolve:
+            raise CategoryConflictError("分类存在并行版本，请查看各版本并合并保存")
+        if len(heads) > 1 and (not isinstance(data, dict) or set(data) != DATA_FIELDS):
+            raise ValueError("合并并行版本时必须提供完整分类内容")
+        value = _data(data, current)
+        if not value["archived"] and db.execute("SELECT 1 FROM category_entities WHERE library_key=? AND archived=0 AND name_key=? AND category_id<>? LIMIT 1",
+            (self.library_key, _name_key(value["name"]), category_id)).fetchone():
+            raise ValueError("已存在同名分类，请换一个名称")
+        payload = dict(schema=1, library_key=self.library_key, data=value, parents=heads,
+                       updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+        self._publish(db, ENTITY_TYPE, category_id, payload)
+        return self._get(db, category_id)
 
-    def assign(self, asset_ids, category_ids, remove=False):
+    def assign(self, asset_ids, category_ids, remove=False, db=None):
+        """Write atomically; optional db joins an existing caller-owned transaction."""
+        if db is not None:
+            if not db.in_transaction:
+                raise RuntimeError("写入必须在调用方事务中运行")
+            return self._assign(db, asset_ids, category_ids, remove)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._assign(connection, asset_ids, category_ids, remove)
+
+    def _assign(self, db, asset_ids, category_ids, remove=False):
         if type(remove) is not bool:
             raise ValueError("分类移除参数不正确")
         assets = _ids(asset_ids, digest=True, allow_empty=False)
         categories = _ids(category_ids, allow_empty=False)
         if len(assets) * len(categories) > 1000:
             raise ValueError("一次最多调整 1000 个素材与分类关联，请分批操作")
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+        for asset_id in assets:
+            if not db.execute("SELECT 1 FROM assets WHERE root_key=? AND asset_id=?", (self.library_key, asset_id)).fetchone():
+                raise ValueError("有素材不在本机当前素材库中，请先同步或扫描")
+        for category_id in categories:
+            category = self._get(db, category_id)
+            if category is None or category["archived"]:
+                raise ValueError("有分类不存在或已归档，请刷新分类列表")
+        changes = []
+        for category_id in categories:
             for asset_id in assets:
-                if not db.execute("SELECT 1 FROM assets WHERE root_key=? AND asset_id=?", (self.library_key, asset_id)).fetchone():
-                    raise ValueError("有素材不在本机当前素材库中，请先同步或扫描")
-            for category_id in categories:
-                category = self._get(db, category_id)
-                if category is None or category["archived"]:
-                    raise ValueError("有分类不存在或已归档，请刷新分类列表")
-            changes = []
-            for category_id in categories:
-                for asset_id in assets:
-                    tags = self._live_tags(db, category_id, asset_id)
-                    if remove and tags or not remove and not tags:
-                        changes.append(dict(category_id=category_id, asset_id=asset_id,
-                                            operation="remove" if remove else "add", tags=tags if remove else []))
-            if not changes:
-                return {"changed": 0}
-            payload = dict(schema=1, library_key=self.library_key, changes=changes,
-                           updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
-            self._publish(db, MEMBERSHIP_ENTITY_TYPE, uuid.uuid4().hex, payload)
-            return {"changed": len(changes)}
+                tags = self._live_tags(db, category_id, asset_id)
+                if remove and tags or not remove and not tags:
+                    changes.append(dict(category_id=category_id, asset_id=asset_id,
+                                        operation="remove" if remove else "add", tags=tags if remove else []))
+        if not changes:
+            return {"changed": 0}
+        payload = dict(schema=1, library_key=self.library_key, changes=changes,
+                       updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+        self._publish(db, MEMBERSHIP_ENTITY_TYPE, uuid.uuid4().hex, payload)
+        return {"changed": len(changes)}

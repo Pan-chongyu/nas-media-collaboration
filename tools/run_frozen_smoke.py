@@ -14,6 +14,7 @@ parser.add_argument("--exe", type=Path, default=root / "build" / version / "dist
 group = parser.add_mutually_exclusive_group()
 group.add_argument("--player", action="store_true")
 group.add_argument("--collaboration", action="store_true")
+group.add_argument("--organizer", action="store_true")
 arguments = parser.parse_args()
 exe = arguments.exe.resolve()
 verification = root / "build" / "verification" / ("frozen-" + uuid.uuid4().hex)
@@ -26,13 +27,17 @@ environment.update(PATH=str(Path(os.environ["SystemRoot"]) / "System32"),
 environment.pop("MPV_PATH", None)
 environment.pop("FFMPEG_PATH", None)
 mode = "--player-smoke-test" if arguments.player else "--collaboration-smoke-test" if arguments.collaboration else "--smoke-test"
+if arguments.organizer:
+    mode = "--organizer-smoke-test"
 result = subprocess.run([str(exe), "--data-dir", str(data), "--no-auto-sync", mode, str(out)],
                         cwd=verification, timeout=60, env=environment,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 if result.returncode:
     raise SystemExit(result.returncode)
 report = json.loads(out.read_text(encoding="utf-8"))
-if arguments.collaboration:
+if arguments.organizer:
+    assert report["ok"] and len(report["checks"]) == 4, report
+elif arguments.collaboration:
     assert report["ok"] and len(report["checks"]) == 9 and report["dnd"], report
 elif arguments.player:
     assert report["ok"] and report["closed"], report
@@ -43,7 +48,7 @@ else:
     assert Path(report["sqlite"]).is_file(), report
     assert Path(report["ffmpeg"]).is_relative_to(exe.parent), report
     assert Path(report["ffmpeg"]).is_file(), report
-if not arguments.collaboration:
+if not arguments.collaboration and not arguments.organizer:
     assert Path(report["mpv"]).is_file(), report
     assert Path(report["mpv"]).is_relative_to(exe.parent), report
 print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -317,32 +317,40 @@ class CollaborationStore:
             connection.execute("BEGIN IMMEDIATE")
             return self._apply(connection, event)
 
-    def save(self, kind, data: dict, entity_id=None, expected_heads=None, resolve=False):
+    def save(self, kind, data: dict, entity_id=None, expected_heads=None, resolve=False, db=None):
+        """Write atomically; optional db joins an existing caller-owned transaction."""
+        if db is not None:
+            if not db.in_transaction:
+                raise RuntimeError("写入必须在调用方事务中运行")
+            return self._save(db, kind, data, entity_id, expected_heads, resolve)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._save(connection, kind, data, entity_id, expected_heads, resolve)
+
+    def _save(self, db, kind, data: dict, entity_id=None, expected_heads=None, resolve=False):
         _kind(kind)
         if type(resolve) is not bool:
             raise ValueError("版本合并参数不正确")
         entity_id = _identity(entity_id, "记录 ID") if entity_id is not None else uuid.uuid4().hex
         expected = _heads(expected_heads) if expected_heads is not None else None
-        with closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            current = self._get(db, entity_id)
-            heads = current["heads"] if current else []
-            if current and current["kind"] != kind:
-                raise ValueError("不能更改协作记录类型")
-            if current and expected is None:
-                raise ConflictError("请重新打开记录后保存，以检查其他人的修改")
-            if expected is not None and expected != heads:
-                raise ConflictError("记录已被修改，请保留当前内容并重新载入最新版本")
-            if len(heads) > 1 and not resolve:
-                raise ConflictError("存在并行版本，请先查看各版本并合并保存")
-            if len(heads) > 1 and (not isinstance(data, dict) or set(data) != DATA_FIELDS):
-                raise ValueError("合并并行版本时必须提供完整内容")
-            payload = dict(schema=1, library_key=self.library_key, kind=kind, data=_data(kind, data, current),
-                           parents=heads, updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
-            payload["revision"] = _revision_hash(entity_id, self.device_id, payload)
-            event = Event.new(self.device_id, ENTITY_TYPE, entity_id, "append", payload,
-                              event_id=payload["revision"], timestamp=payload["updated_at"])
-            self._apply(db, event)
-            db.execute("INSERT INTO outbox VALUES(?,?,?,?)",
-                       (event.event_id, self.library_key, _json(event.to_dict()), payload["updated_at"]))
-            return self._get(db, entity_id)
+        current = self._get(db, entity_id)
+        heads = current["heads"] if current else []
+        if current and current["kind"] != kind:
+            raise ValueError("不能更改协作记录类型")
+        if current and expected is None:
+            raise ConflictError("请重新打开记录后保存，以检查其他人的修改")
+        if expected is not None and expected != heads:
+            raise ConflictError("记录已被修改，请保留当前内容并重新载入最新版本")
+        if len(heads) > 1 and not resolve:
+            raise ConflictError("存在并行版本，请先查看各版本并合并保存")
+        if len(heads) > 1 and (not isinstance(data, dict) or set(data) != DATA_FIELDS):
+            raise ValueError("合并并行版本时必须提供完整内容")
+        payload = dict(schema=1, library_key=self.library_key, kind=kind, data=_data(kind, data, current),
+                       parents=heads, updated_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+        payload["revision"] = _revision_hash(entity_id, self.device_id, payload)
+        event = Event.new(self.device_id, ENTITY_TYPE, entity_id, "append", payload,
+                          event_id=payload["revision"], timestamp=payload["updated_at"])
+        self._apply(db, event)
+        db.execute("INSERT INTO outbox VALUES(?,?,?,?)",
+                   (event.event_id, self.library_key, _json(event.to_dict()), payload["updated_at"]))
+        return self._get(db, entity_id)

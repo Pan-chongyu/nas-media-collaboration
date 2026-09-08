@@ -264,6 +264,32 @@ class WorkspaceTests(unittest.TestCase):
         self.app._toggle_batch()
         self.assertFalse(self.app.checked_ids)
 
+    def test_script_organizer_preview_return_and_dirty_exit_guard(self):
+        script = self.app.service.collaboration.save("script", {"title": "采访脚本", "body": "# interview\n关键词：interview\n拍摄采访镜头。"})
+        self.app.show_page("脚本")
+        self._pump_until(lambda: self.app.collaboration_page.records)
+        page = self.app.collaboration_page
+        self.assertTrue(page.organize_button.instate(["!disabled"]))
+        window = page.organize_selected()
+        window.build_plan()
+        self._pump_until(lambda: window.plan is not None)
+        first_section = window.plan["sections"][0]
+        self.assertTrue(first_section["candidates"])
+        identity = first_section["candidates"][0]["asset_id"]
+        window.section_tree.selection_set(first_section["section_id"])
+        window._section_selected()
+        window.toggle_candidate(identity)
+        before = set(first_section["selected_ids"])
+        with patch("main.messagebox.askyesno", return_value=False):
+            self.app.close()
+        self.assertFalse(self.app.stop_event.is_set())
+        window.iconify()
+        self.app.preview_asset_id(identity)
+        self._pump_until(lambda: self.app.active_page == "素材库" and self.app.selected_id == identity)
+        self.assertIs(self.app.open_organizer(script), window)
+        self.assertEqual(set(window.plan["sections"][0]["selected_ids"]), before)
+        window.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

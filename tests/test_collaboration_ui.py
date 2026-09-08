@@ -268,6 +268,19 @@ class CollaborationUITests(unittest.TestCase):
         self.assertEqual(saved["entity_id"], identity)
         self.assertEqual(saved["asset_ids"], [asset["asset_id"]])
 
+    def test_script_organizer_entry_uses_saved_record_and_blocks_archived(self):
+        record = self.service.collaboration.save("script", {"title": "分镜脚本", "body": "采访"})
+        opened = []
+        self.app.open_organizer = opened.append
+        page = self.open_page()
+        page.organize_button.invoke()
+        self.assertEqual(opened[0]["entity_id"], record["entity_id"])
+        self.service.collaboration.save("script", {"archived": True}, record["entity_id"], record["heads"])
+        page.include_archived.set(True)
+        page.refresh()
+        self.pump(lambda: page.records and page.records[0]["archived"])
+        self.assertTrue(page.organize_button.instate(["disabled"]))
+
 
 if __name__ == "__main__":
     unittest.main()

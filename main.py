@@ -28,7 +28,7 @@ from file_transfer import DragDropRoot, register_file_drag
 
 
 APP_NAME = "素材协作"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 DEFAULT_ROOT = r"\\SmartStorage\新媒体-137964276\素材库"
 DEFAULT_SYNC_ROOT = r"\\SmartStorage\新媒体-137964276\素材协作数据"
 DEFAULT_PUBLISH_ROOT = r"\\SmartStorage\新媒体-137964276\软件库\素材协作"
@@ -146,6 +146,7 @@ class Workspace(DragDropRoot):
         self._pending_preview = None
         self._pending_asset_id = None
         self.collaboration_page = None
+        self._organizer_window = None
         self._reload_after = self._resize_after = self._search_after = None
         self._status = tk.StringVar(value="本地索引就绪")
         self._scan_status = tk.StringVar(value="尚未扫描")
@@ -200,7 +201,7 @@ class Workspace(DragDropRoot):
         tk.Label(sidebar, text="▣  素材协作", bg="#182532", fg="white", font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w", padx=16, pady=(25, 4))
         tk.Label(sidebar, text="MEDIA WORKSPACE", bg="#182532", fg="#7995a8", font=("Segoe UI", 8)).pack(anchor="w", padx=19, pady=(0, 28))
         self.nav = {}
-        for name in ("素材库", "任务中心", "工单", "脚本", "设置"):
+        for name in ("素材库", "素材整理器", "任务中心", "工单", "脚本", "设置"):
             button = tk.Button(sidebar, text=name, anchor="w", bg="#182532", fg="#b2c0cf", activebackground="#284253",
                                activeforeground="white", bd=0, padx=18, pady=13, command=lambda page=name: self.show_page(page))
             button.pack(fill="x", padx=8, pady=3)
@@ -224,6 +225,8 @@ class Workspace(DragDropRoot):
         self.bind("<KeyPress>", self._preview_shortcut, add="+")
 
     def show_page(self, name: str):
+        if name == "素材整理器":
+            return self.open_organizer()
         self._stop_player()
         self.active_page = name
         self.query_generation += 1
@@ -252,6 +255,32 @@ class Workspace(DragDropRoot):
             ttk.Label(self.page, text=name, style="Title.TLabel").pack(anchor="w", pady=(0, 20))
             ttk.Label(self.page, text="暂无记录", style="Muted.TLabel").pack(anchor="center", pady=80)
         self._request_overview()
+
+    def open_organizer(self, script=None):
+        from organizer_ui import OrganizerWindow
+        window = self._organizer_window
+        if window is not None and window.winfo_exists():
+            if window.service is self.service:
+                if script is not None:
+                    window.load_script(script)
+                window.deiconify()
+                window.lift()
+                return window
+            window.close()
+            if window.winfo_exists():
+                window.deiconify()
+                window.lift()
+                return window
+        service = self.service
+        self._organizer_window = OrganizerWindow(self, script=script,
+            on_changed=lambda: self._organizer_changed(service))
+        return self._organizer_window
+
+    def _organizer_changed(self, service):
+        if service is self.service:
+            self._categories_changed(service)
+            if self.collaboration_page is not None:
+                self.collaboration_page.refresh()
 
     def _assets_page(self):
         titlebar = ttk.Frame(self.page)
@@ -1439,11 +1468,11 @@ class Workspace(DragDropRoot):
         self.after(60, self._drain_messages)
 
     def close(self):
-        category_dialogs = [child for child in self.winfo_children() if isinstance(child, tk.Toplevel) and callable(getattr(child, "dirty", None))]
-        if any(child.saving for child in category_dialogs):
-            messagebox.showinfo(APP_NAME, "分类正在保存，请稍候再退出。", parent=self)
+        draft_dialogs = [child for child in self.winfo_children() if isinstance(child, tk.Toplevel) and callable(getattr(child, "dirty", None))]
+        if any(child.saving for child in draft_dialogs):
+            messagebox.showinfo(APP_NAME, "编辑窗口正在保存，请稍候再退出。", parent=self)
             return
-        if any(child.dirty() for child in category_dialogs) and not messagebox.askyesno(APP_NAME, "分类编辑尚未保存。确定放弃修改并退出？", parent=self):
+        if any(child.dirty() for child in draft_dialogs) and not messagebox.askyesno(APP_NAME, "编辑窗口还有未保存的修改。确定放弃修改并退出？", parent=self):
             return
         editors = [child for child in self.winfo_children()
                    if isinstance(child, tk.Toplevel) and hasattr(child, "initial_data") and not callable(getattr(child, "dirty", None))]
@@ -1469,11 +1498,17 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-test", type=Path)
     parser.add_argument("--player-smoke-test", type=Path)
     parser.add_argument("--collaboration-smoke-test", type=Path)
+    parser.add_argument("--organizer-smoke-test", type=Path)
     arguments = parser.parse_args()
     if arguments.collaboration_smoke_test and not arguments.data_dir:
         parser.error("--collaboration-smoke-test requires an isolated --data-dir")
-    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test and not arguments.player_smoke_test and not arguments.collaboration_smoke_test)
-    if arguments.collaboration_smoke_test:
+    if arguments.organizer_smoke_test and not arguments.data_dir:
+        parser.error("--organizer-smoke-test requires an isolated --data-dir")
+    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test and not arguments.player_smoke_test and not arguments.collaboration_smoke_test and not arguments.organizer_smoke_test)
+    if arguments.organizer_smoke_test:
+        from organizer_smoke import run_smoke
+        run_smoke(app, arguments.organizer_smoke_test)
+    elif arguments.collaboration_smoke_test:
         from collaboration_smoke import run_smoke
         run_smoke(app, arguments.collaboration_smoke_test)
     elif arguments.player_smoke_test:
