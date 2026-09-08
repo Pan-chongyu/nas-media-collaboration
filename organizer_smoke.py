@@ -36,10 +36,12 @@ def run_smoke(app, report_path: Path):
                 media.mkdir()
                 for name, color in (("门店外景.png", "#087f72"), ("人物采访.png", "#2563eb"), ("其他素材.png", "#475569")):
                     Image.new("RGB", (240, 135), color).save(media / name)
+                for index in range(25):
+                    Image.new("RGB", (240, 135), "#087f72").save(media / f"门店外景-{index:02}.png")
                 app.settings.update(nas_root=str(media), sync_root=str(app.data_dir / "organizer-shared"),
                                     device_id="organizer-smoke", display_name="验证用户")
                 app.service = LibraryService(app.data_dir, str(media), app.settings["sync_root"], app.settings["device_id"])
-                assert app.service.scan()["changed"] == 3
+                assert app.service.scan()["changed"] == 28
                 state["window"] = window = app.open_organizer()
                 source = app.data_dir / "门店短片.docx"
                 with ZipFile(source, "w") as archive:
@@ -69,6 +71,18 @@ def run_smoke(app, report_path: Path):
                 assert all(section["candidates"] for section in window.plan["sections"])
                 assert not app.service.categories.list_records()
                 checks.append("script_sections_and_local_matches")
+                first = window.plan["sections"][0]
+                assert (len(first["candidates"]), first["candidate_total"]) == (20, 26)
+                window.script_view.set("人物台词")
+                window._render_script_view()
+                assert "店长：欢迎光临。" in window.section_body.get("1.0", "end-1c")
+                window.load_more()
+                state["step"] = "more"
+            elif step == "more" and not state["window"].busy:
+                window = state["window"]
+                assert len(window.plan["sections"][0]["candidates"]) == 26
+                assert window.more_button.instate(["disabled"])
+                checks.append("candidate_paging_and_inline_script_view")
                 for section in window.plan["sections"]:
                     window.section_tree.selection_set(section["section_id"])
                     window._section_selected()

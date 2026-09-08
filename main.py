@@ -28,7 +28,7 @@ from file_transfer import DragDropRoot, register_file_drag
 
 
 APP_NAME = "素材协作"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 DEFAULT_ROOT = r"\\SmartStorage\新媒体-137964276\素材库"
 DEFAULT_SYNC_ROOT = r"\\SmartStorage\新媒体-137964276\素材协作数据"
 DEFAULT_PUBLISH_ROOT = r"\\SmartStorage\新媒体-137964276\软件库\素材协作"

@@ -18,6 +18,8 @@ from script_import import read_script_file
 
 
 PAGE_SIZE = 30
+MATCH_PAGE_SIZE = 20
+MAX_LOADED_CANDIDATES = 1000
 BG = "#f1f4f7"
 FG = "#172738"
 MUTED = "#748293"
@@ -29,6 +31,15 @@ def _section_preview_text(section):
     if section.get("format") == "timed_shooting" and context and text.startswith(context):
         return text[len(context):]
     return text
+
+
+def _section_views(section):
+    views = {"完整分镜": _section_preview_text(section)}
+    if section.get("format") == "timed_shooting":
+        views.update({"镜头 / 动作": section.get("visual_text", ""),
+                      "人物台词": section.get("dialogue_text", ""),
+                      "拍摄信息": section.get("context_text", "").replace("\t", "\n\n")})
+    return views
 
 
 def _perform(operation, results, identity):
@@ -122,6 +133,9 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self._generation = self._thumbnail_generation = 0
         self._reviewed = None
         self._images = {}
+        self._image_hashes = {}
+        self._rendered_section_id = None
+        self.script_view = tk.StringVar(self, value="完整分镜")
         self.title_var = tk.StringVar(self)
         self.source_note = tk.StringVar(self, value="导入 Word 拍摄脚本、粘贴正文，或选择已保存的脚本")
         self.category_var = tk.StringVar(self)
@@ -229,7 +243,7 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         detail = ttk.Frame(parent)
         detail.grid(row=0, column=1, sticky="nsew")
         detail.columnconfigure(1, weight=1)
-        detail.rowconfigure(5, weight=1)
+        detail.rowconfigure(2, weight=1)
         ttk.Label(detail, text="分类名称").grid(row=0, column=0, sticky="w", padx=(0, 9))
         self.category_entry = ttk.Entry(detail, textvariable=self.category_var)
         self.category_entry.grid(row=0, column=1, columnspan=2, sticky="ew")
@@ -239,20 +253,39 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self.rematch_button = ttk.Button(detail, text="重新匹配", command=self.rematch)
         self.rematch_button.grid(row=1, column=2, padx=(8, 0))
         self.keywords_entry.bind("<Return>", lambda event: self.rematch())
-        text_frame, self.section_body = _text(detail, height=2, readonly=True)
-        text_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
-        ttk.Label(detail, textvariable=self.section_note, style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 5))
-        actions = ttk.Frame(detail)
-        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-        ttk.Button(actions, text="勾选本组候选", command=self.select_suggestions).pack(side="left")
+        self.review_split = tk.PanedWindow(detail, orient="vertical", bg=BG, bd=0,
+                                          sashwidth=7, sashrelief="flat", showhandle=False)
+        self.review_split.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        script_panel = ttk.Frame(self.review_split)
+        script_panel.columnconfigure(0, weight=1)
+        script_panel.rowconfigure(1, weight=1)
+        script_toolbar = ttk.Frame(script_panel)
+        script_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        ttk.Label(script_toolbar, text="本段脚本", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+        self.view_selector = ttk.Combobox(script_toolbar, state="readonly", width=12,
+            values=("完整分镜",), textvariable=self.script_view)
+        self.view_selector.pack(side="right")
+        self.view_selector.bind("<<ComboboxSelected>>", lambda event: self._render_script_view())
+        text_frame, self.section_body = _text(script_panel, height=3, readonly=True)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        self.review_split.add(script_panel, minsize=82, height=110, stretch="never")
+        candidate_panel = ttk.Frame(self.review_split)
+        candidate_panel.columnconfigure(0, weight=1)
+        candidate_panel.rowconfigure(2, weight=1)
+        self.review_split.add(candidate_panel, minsize=235, stretch="always")
+        ttk.Label(candidate_panel, textvariable=self.section_note, style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=(4, 5))
+        actions = ttk.Frame(candidate_panel)
+        actions.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(actions, text="勾选已加载", command=self.select_suggestions).pack(side="left")
         ttk.Button(actions, text="清空勾选", command=self.clear_selection).pack(side="left", padx=7)
         ttk.Button(actions, text="搜索补充素材", command=self.open_material_picker).pack(side="right")
-        frame = ttk.Frame(detail)
-        frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        frame = ttk.Frame(candidate_panel)
+        frame.grid(row=2, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         style = ttk.Style(self)
         style.configure("Organizer.Treeview", rowheight=64)
+        style.configure("Organizer.Treeview.Heading", padding=(8, 4))
         self.candidate_tree = ttk.Treeview(frame, columns=("check", "name", "reason"), show="tree headings", selectmode="browse", style="Organizer.Treeview", height=3)
         self.candidate_tree.heading("#0", text="缩略图")
         self.candidate_tree.column("#0", width=124, minwidth=124, stretch=False)
@@ -267,10 +300,15 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self.candidate_tree.bind("<space>", self._candidate_space)
         self.candidate_tree.bind("<Double-1>", lambda event: self.preview_selected())
         self.candidate_tree.tag_configure("checked", foreground="#087f72")
+        candidate_footer = ttk.Frame(candidate_panel)
+        candidate_footer.grid(row=3, column=0, sticky="ew", pady=(5, 0))
+        candidate_footer.columnconfigure(0, weight=1)
         self.candidate_detail = tk.StringVar(self)
-        label = ttk.Label(detail, textvariable=self.candidate_detail, style="Muted.TLabel", wraplength=600)
-        label.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        label = ttk.Label(candidate_footer, textvariable=self.candidate_detail, style="Muted.TLabel", wraplength=600)
+        label.grid(row=0, column=0, sticky="ew")
         label.bind("<Configure>", lambda event: label.configure(wraplength=max(100, event.width)))
+        self.more_button = ttk.Button(candidate_footer, text="加载更多", command=self.load_more, state="disabled")
+        self.more_button.grid(row=0, column=1, padx=(7, 0))
         self.candidate_tree.bind("<<TreeviewSelect>>", self._candidate_selected)
         footer = ttk.Frame(parent)
         footer.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(11, 0))
@@ -346,6 +384,8 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self.section_tree.delete(*self.section_tree.get_children())
         self.candidate_tree.delete(*self.candidate_tree.get_children())
         self._images.clear()
+        self._image_hashes.clear()
+        self._rendered_section_id = None
         self.apply_button.state(["disabled"])
         self.notice.set("点击“生成整理方案”，然后逐组预览并勾选。")
         self._baseline = self._snapshot()
@@ -426,6 +466,8 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
                 self.notice.set("脚本在匹配期间已修改，请重新生成整理方案。")
                 return
             self.plan = plan
+            for section in plan["sections"]:
+                self._reset_match_page(section)
             self.active_section_id = None
             self._reviewed = None
             self.notebook.tab(self.review_tab, state="normal")
@@ -448,6 +490,49 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
 
     def _section(self):
         return next((section for section in (self.plan or {}).get("sections", []) if section["section_id"] == self.active_section_id), None)
+
+    @staticmethod
+    def _reset_match_page(section):
+        section["_match_offset"] = len(section.get("candidates", []))
+        section["_match_keywords"] = tuple(section.get("keywords", []))
+
+    def _remember_candidates(self):
+        section = next((item for item in (self.plan or {}).get("sections", [])
+                        if item["section_id"] == self._rendered_section_id), None)
+        if section:
+            selected = self.candidate_tree.selection()
+            if selected:
+                section["_focus_id"] = selected[0]
+            children = self.candidate_tree.get_children()
+            if children:
+                section["_scroll"] = self.candidate_tree.yview()[0]
+                section["_top_id"] = children[min(len(children) - 1, round(section["_scroll"] * len(children)))]
+
+    def _render_script_view(self):
+        section = self._section()
+        if not section:
+            return
+        views = _section_views(section)
+        choice = self.script_view.get()
+        if choice not in views:
+            choice = "完整分镜"
+            self.script_view.set(choice)
+        self.view_selector.configure(values=tuple(views))
+        section["_script_view"] = choice
+        _set_text(self.section_body, views[choice] or "本段没有单独标注此项内容，可切换到完整分镜。", readonly=True)
+
+    def _update_candidate_status(self):
+        section = self._section()
+        if not section:
+            self.more_button.state(["disabled"])
+            return
+        candidates = section.get("candidates", [])
+        selected = section.get("selected_ids", [])
+        offset = section.get("_match_offset", len(candidates))
+        total = section.get("candidate_total", 0)
+        self.section_note.set(f"已加载 {len(candidates)} 个 · 匹配 {total} 个 · 已选 {len(selected)} 个" if candidates else "暂无候选 · 调整关键词或搜索补充素材")
+        self.more_button.state(["!disabled"] if not self.busy and not self.saving and offset < total and offset < MAX_LOADED_CANDIDATES else ["disabled"])
+        self.more_button.configure(text="已加载上限" if offset >= MAX_LOADED_CANDIDATES and offset < total else "加载更多")
 
     def _flush_section(self):
         section = self._section()
@@ -472,32 +557,46 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         if not selected or selected[0] == self.active_section_id:
             return
         self._flush_section()
+        self._remember_candidates()
         self.active_section_id = selected[0]
         section = self._section()
         self.category_var.set(section.get("category_name", ""))
         self.keywords_var.set("、".join(section.get("keywords", [])))
-        _set_text(self.section_body, _section_preview_text(section), readonly=True)
+        self.script_view.set(section.get("_script_view", "完整分镜"))
+        self._render_script_view()
         self._render_candidates()
 
     def _render_candidates(self):
+        self._remember_candidates()
         self._thumbnail_generation += 1
         generation = self._thumbnail_generation
         self.candidate_tree.delete(*self.candidate_tree.get_children())
-        self._images.clear()
         section = self._section()
         if not section:
             return
+        self._rendered_section_id = section["section_id"]
         candidates = section.get("candidates", [])
+        hashes = {item["asset_id"]: item.get("file_hash", "") for item in candidates}
+        self._images = {identity: photo for identity, photo in self._images.items()
+                        if identity in hashes and self._image_hashes.get(identity) == hashes[identity]}
+        self._image_hashes = {identity: hashes[identity] for identity in self._images}
         selected = set(section.get("selected_ids", []))
         for item in candidates:
             identity = item["asset_id"]
             checked = identity in selected
             self.candidate_tree.insert("", "end", iid=identity, text="暂无封面", values=("☑" if checked else "☐", item["name"], "；".join(item.get("reasons", []))), tags=("checked",) if checked else ())
-        self.section_note.set(f"显示 {len(candidates)} 个候选 · 匹配 {section.get('candidate_total', 0)} 个 · 已选 {len(selected)} 个" if candidates else "未找到候选 · 调整关键词或点击“搜索补充素材”")
+            if identity in self._images:
+                self.candidate_tree.item(identity, image=self._images[identity], text="")
+        self._update_candidate_status()
         self.candidate_detail.set("点击选择列勾选 · 双击素材在主窗口预览，方案会保留")
         if candidates:
-            self.candidate_tree.selection_set(candidates[0]["asset_id"])
-            records, cache = deepcopy(candidates), self.service.cache_dir
+            focus = section.get("_focus_id")
+            self.candidate_tree.selection_set(focus if focus and self.candidate_tree.exists(focus) else candidates[0]["asset_id"])
+            top = section.get("_top_id")
+            ids = [item["asset_id"] for item in candidates]
+            self.candidate_tree.yview_moveto(ids.index(top) / len(ids) if top in ids else section.get("_scroll", 0))
+            records = deepcopy([item for item in candidates if item["asset_id"] not in self._images])
+            cache = self.service.cache_dir
 
             def loaded(images):
                 if generation != self._thumbnail_generation:
@@ -506,9 +605,11 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
                     if self.candidate_tree.exists(identity):
                         photo = ImageTk.PhotoImage(frame, master=self)
                         self._images[identity] = photo
+                        self._image_hashes[identity] = hashes[identity]
                         self.candidate_tree.item(identity, image=photo, text="")
 
-            self._run(lambda: _cached_thumbnails(records, cache), loaded)
+            if records:
+                self._run(lambda: _cached_thumbnails(records, cache), loaded)
 
     def _candidate_selected(self, _event=None):
         selected = self.candidate_tree.selection()
@@ -552,7 +653,7 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
             values = list(self.candidate_tree.item(identity, "values"))
             values[0] = "☑" if identity in selected else "☐"
             self.candidate_tree.item(identity, values=values, tags=("checked",) if identity in selected else ())
-        self.section_note.set(f"显示 {len(section.get('candidates', []))} 个候选 · 匹配 {section.get('candidate_total', 0)} 个 · 已选 {len(selected)} 个")
+        self._update_candidate_status()
 
     def select_suggestions(self):
         section = self._section()
@@ -574,18 +675,28 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         identity = self.plan.get("script_id")
         self.busy = True
         self.rematch_button.state(["disabled"])
+        self._update_candidate_status()
         self.notice.set("正在按新关键词重新匹配，已勾选素材会保留…")
 
         def loaded(result):
             self.busy = False
             self.rematch_button.state(["!disabled"])
+            self._flush_section()
             current = next(item for item in self.plan["sections"] if item["section_id"] == section["section_id"])
+            if current["keywords"] != section["keywords"]:
+                self._update_candidate_status()
+                self.notice.set("匹配期间关键词有修改，原候选与勾选已保留，请重新匹配。")
+                return
             candidates, total = result
             ids = {item["asset_id"] for item in candidates}
             retained = [item for item in current.get("candidates", []) if item["asset_id"] in current.get("selected_ids", []) and item["asset_id"] not in ids]
             current["candidates"], current["candidate_total"] = [*candidates, *retained], total
+            current["_match_offset"] = len(candidates)
+            current["_match_keywords"] = tuple(section["keywords"])
             if self.active_section_id == current["section_id"]:
                 self._render_candidates()
+            else:
+                self._update_candidate_status()
             self._reviewed = None
             self.apply_button.state(["disabled"])
             self.notice.set("匹配已更新，原有勾选已保留。请预览确认。")
@@ -593,9 +704,62 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         def failed(error):
             self.busy = False
             self.rematch_button.state(["!disabled"])
+            self._update_candidate_status()
             self.notice.set("重新匹配失败，原方案已保留：" + error)
 
         self._run(lambda: organizer.match(section, script_id=identity, limit=20), loaded, failed)
+
+    def load_more(self):
+        if self.saving or self.busy or not self._section() or not self._same_library():
+            return
+        self._flush_section()
+        section = self._section()
+        if tuple(section["keywords"]) != section.get("_match_keywords", tuple(section["keywords"])):
+            self.notice.set("关键词已修改，请先点击“重新匹配”再加载更多。")
+            return
+        offset = section.get("_match_offset", len(section.get("candidates", [])))
+        if offset >= section.get("candidate_total", 0):
+            return
+        if offset >= MAX_LOADED_CANDIDATES:
+            self.notice.set("本组已加载 1000 个候选，请细化关键词，或通过搜索补充其他素材。")
+            return
+        section_id, keywords = section["section_id"], tuple(section["keywords"])
+        query = {"keywords": list(keywords)}
+        organizer, identity = self.organizer, self.plan.get("script_id")
+        self.busy = True
+        self._update_candidate_status()
+        self.notice.set("正在加载下一批候选，已有勾选会保留…")
+
+        def loaded(result):
+            self.busy = False
+            self._flush_section()
+            current = next(item for item in self.plan["sections"] if item["section_id"] == section_id)
+            if tuple(current["keywords"]) != keywords:
+                self._update_candidate_status()
+                self.notice.set("加载期间关键词有修改，原候选与勾选已保留，请重新匹配。")
+                return
+            candidates, total = result
+            current["_match_offset"] = offset + len(candidates) if candidates else max(offset, total)
+            current["candidate_total"] = total
+            by_id = {item["asset_id"]: item for item in current["candidates"]}
+            for item in candidates:
+                if item["asset_id"] in by_id:
+                    by_id[item["asset_id"]].update(item)
+                else:
+                    current["candidates"].append(item)
+                    by_id[item["asset_id"]] = item
+            if self.active_section_id == section_id:
+                self._render_candidates()
+            else:
+                self._update_candidate_status()
+            self.notice.set("候选已加载，原有勾选和查看位置已保留。")
+
+        def failed(error):
+            self.busy = False
+            self._update_candidate_status()
+            self.notice.set("加载未完成，原候选与勾选已保留：" + error)
+
+        self._run(lambda: organizer.match(query, script_id=identity, limit=MATCH_PAGE_SIZE, offset=offset), loaded, failed)
 
     def open_material_picker(self):
         if self._section() and not self.saving:
@@ -649,11 +813,7 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
             ttk.Label(outer, text="分镜 " + section["shot_number"] + " · " + section["time_range"], style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 10))
         tabs = ttk.Notebook(outer, style="Organizer.TNotebook")
         tabs.grid(row=2, column=0, sticky="nsew", pady=8)
-        views = [("完整分镜", _section_preview_text(section))]
-        if section.get("format") == "timed_shooting":
-            views.extend((("镜头 / 动作", section.get("visual_text", "")),
-                          ("人物台词", section.get("dialogue_text", "")),
-                          ("拍摄信息", section.get("context_text", ""))))
+        views = _section_views(section).items()
         dialog.text_views = {}
         for label, content in views:
             page = ttk.Frame(tabs, padding=10)

@@ -219,6 +219,8 @@ class OrganizerUITests(unittest.TestCase):
                 window.review_plan()
             window.notebook.select(tab)
             self.app.update()
+            if tab is window.review_tab:
+                self.assertGreaterEqual(window.candidate_tree.winfo_height(), 100)
             for widget in widgets:
                 self.assertTrue(widget.winfo_ismapped())
                 self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), window.winfo_rootx() + window.winfo_width())
@@ -305,6 +307,98 @@ class OrganizerUITests(unittest.TestCase):
         self.assertEqual(window.title_var.get(), "读取期间的新草稿")
         self.assertIn("已保留原方案", window.notice.get())
         self.assertIsNone(window.plan)
+
+    def test_more_candidates_preserve_manual_selection_focus_and_section_scroll(self):
+        window = self.window
+        plan = self.build(saved=True)
+        window.keywords_var.set("其他素材")
+        window.rematch()
+        self.pump(lambda: not window.busy)
+        first = plan["sections"][0]
+        self.assertEqual((len(first["candidates"]), first["candidate_total"]), (20, 33))
+        selected = first["candidates"][10]["asset_id"]
+        window.toggle_candidate(selected)
+        window.candidate_tree.selection_set(selected)
+        window.candidate_tree.see(selected)
+        self.app.update()
+        children = window.candidate_tree.get_children()
+        top = children[round(window.candidate_tree.yview()[0] * len(children))]
+        manual = self.assets["其他素材-32.png"]
+        window.add_materials([manual])
+        self.assertEqual(first["_match_offset"], 20)
+        window.load_more()
+        self.pump(lambda: not window.busy)
+        self.assertEqual(len(first["candidates"]), 33)
+        self.assertEqual(len({item["asset_id"] for item in first["candidates"]}), 33)
+        self.assertEqual(set(first["selected_ids"]), {selected, manual["asset_id"]})
+        self.assertEqual(window.candidate_tree.selection(), (selected,))
+        children = window.candidate_tree.get_children()
+        self.assertEqual(children[round(window.candidate_tree.yview()[0] * len(children))], top)
+        self.assertTrue(window.more_button.instate(["disabled"]))
+        window.candidate_tree.see(first["candidates"][-1]["asset_id"])
+        self.app.update()
+        position = window.candidate_tree.yview()[0]
+        window.section_tree.selection_set(plan["sections"][1]["section_id"])
+        window._section_selected()
+        window.section_tree.selection_set(first["section_id"])
+        window._section_selected()
+        self.app.update()
+        self.assertEqual(window.candidate_tree.selection(), (selected,))
+        self.assertAlmostEqual(window.candidate_tree.yview()[0], position, places=2)
+        self.assertFalse(self.service.categories.list_records())
+
+    def test_keyword_changes_during_paging_reject_old_results_without_losing_choices(self):
+        window = self.window
+        self.build()
+        window.keywords_var.set("其他素材")
+        window.rematch()
+        self.pump(lambda: not window.busy)
+        first = window._section()
+        window.toggle_candidate(first["candidates"][0]["asset_id"])
+        selected = list(first["selected_ids"])
+        release = threading.Event()
+        method = window.organizer.match
+
+        def delayed(*args, **kwargs):
+            release.wait(4)
+            return method(*args, **kwargs)
+
+        with patch.object(window.organizer, "match", side_effect=delayed):
+            window.load_more()
+            window.keywords_var.set("门店")
+            release.set()
+            self.pump(lambda: not window.busy)
+        self.assertEqual(first["_match_offset"], 20)
+        self.assertEqual(len(first["candidates"]), 20)
+        self.assertEqual(first["selected_ids"], selected)
+        self.assertIn("关键词有修改", window.notice.get())
+        with patch.object(window.organizer, "match") as matcher:
+            window.load_more()
+            matcher.assert_not_called()
+        self.assertIn("先点击", window.notice.get())
+
+    def test_inline_script_views_and_resize_do_not_change_plan_or_choices(self):
+        window = self.window
+        record = self.service.collaboration.save("script", dict(title="交接", body="时长：20秒\t场景：门店\n01 0-8秒 开场\n镜头：门店外观。\n店长：准备好了。\n02 9-20秒 收尾\n镜头：厨房特写。"))
+        window.load_script(record)
+        window.build_plan()
+        self.pump(lambda: window.plan is not None and not window.busy)
+        window.script_view.set("人物台词")
+        window._render_script_view()
+        self.assertIn("店长：准备好了。", window.section_body.get("1.0", "end-1c"))
+        self.assertNotIn("镜头：", window.section_body.get("1.0", "end-1c"))
+        window.script_view.set("拍摄信息")
+        window._render_script_view()
+        self.assertIn("20秒\n\n场景", window.section_body.get("1.0", "end-1c"))
+        window.geometry("1000x700")
+        self.app.update()
+        before = window.review_split.sash_coord(0)[1]
+        window.review_split.sash_place(0, 0, max(90, before - 40))
+        self.app.update()
+        self.assertNotEqual(before, window.review_split.sash_coord(0)[1])
+        self.assertGreater(window.candidate_tree.winfo_height(), 60)
+        self.assertFalse(window.dirty())
+        self.assertEqual([section["selected_ids"] for section in window.plan["sections"]], [[], []])
 
 
 if __name__ == "__main__":

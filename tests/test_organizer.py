@@ -160,6 +160,68 @@ class OrganizerTests(unittest.TestCase):
         self.assertEqual(script_total, 34)
         self.assertEqual(len({item["entity_id"] for item in scripts1 + scripts2}), 34)
 
+    def test_match_candidate_paging_covers_all_ranked_rows_without_writes(self):
+        rows = self.insert(self.a, [f"文件名/分页 {index:03d}.mov" for index in range(35)] +
+                           [f"分页目录/{index:03d}.mov" for index in range(25)] +
+                           [f"分类匹配/{index:03d}.mov" for index in range(7)] +
+                           [f"脚本绑定/{index:03d}.mov" for index in range(4)] +
+                           ["分页/Ａ.mov", "分页/A.mov"])
+        category = self.a.categories.save({"name": "分页"})
+        classified = [row["asset_id"] for row in rows if row["relative_path"].startswith("分类匹配/")]
+        bound = [row["asset_id"] for row in rows if row["relative_path"].startswith("脚本绑定/")]
+        self.a.categories.assign(classified, [category["category_id"]])
+        script = self.script(asset_ids=bound)
+        section = {"keywords": ["分页"]}
+        with closing(open_index(self.a.db_path)) as db, db:
+            db.execute("INSERT INTO thumbnails VALUES(?,?,?,?,?)", (bound[-1], bound[-1], str(self.base / "cached.jpg"), "ready", "now"))
+        before = self.state()
+        before_db = self.a.db_path.read_bytes()
+        with patch("pathlib.Path.stat", side_effect=AssertionError("must not stat media")), \
+             patch("pathlib.Path.open", side_effect=AssertionError("must not open media")):
+            expected, total = self.organizer.match(section, script["entity_id"], limit=100)
+            pages = [self.organizer.match(section, script["entity_id"], limit=20, offset=offset)
+                     for offset in (0, 20, 40, 60, 80)]
+            huge = self.organizer.match(section, script["entity_id"], offset=10 ** 100)
+            repeated = self.organizer.match(section, script["entity_id"], limit=20, offset=20)
+        self.assertEqual(total, 73)
+        self.assertEqual([page_total for _, page_total in pages], [73] * 5)
+        self.assertEqual([len(items) for items, _ in pages], [20, 20, 20, 13, 0])
+        all_items = [item for items, _ in pages for item in items]
+        self.assertEqual(len({item["asset_id"] for item in all_items}), 73)
+        self.assertEqual(all_items, expected)
+        self.assertEqual(pages[1], repeated)
+        self.assertEqual(huge, ([], 73))
+        self.assertEqual(before, self.state())
+        self.assertEqual(before_db, self.a.db_path.read_bytes())
+        self.assertEqual([item["score"] for item in all_items[-4:]], [0.1] * 4)
+        cached = next(item for item in all_items if item["asset_id"] == bound[-1])
+        self.assertEqual(cached["thumbnail_status"], "ready")
+        self.assertEqual(cached["thumbnail"], str(self.base / "cached.jpg"))
+
+    def test_bound_only_and_empty_keyword_candidate_pages(self):
+        script = self.script(asset_ids=[row["asset_id"] for row in self.rows])
+        expected, total = self.organizer.match({"keywords": []}, script["entity_id"], limit=100)
+        pages = [self.organizer.match({"keywords": []}, script["entity_id"], limit=2, offset=offset)
+                 for offset in (0, 2, 4, 6)]
+        self.assertEqual(total, 6)
+        self.assertEqual([item for items, _ in pages for item in items], expected)
+        self.assertTrue(all(page_total == 6 for _, page_total in pages))
+        self.assertEqual(pages[-1], ([], 6))
+        self.assertEqual(self.organizer.match({"keywords": []}, offset=2), ([], 0))
+
+    def test_candidate_paging_rejects_invalid_parameters_and_changed_library(self):
+        before = self.state()
+        for offset in (-1, True, False, 1.5, "20", None):
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, "偏移量"):
+                self.organizer.match({"keywords": ["门店"]}, offset=offset)
+        for limit in (0, 101, True, 1.5, "20", None):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                self.organizer.match({"keywords": ["门店"]}, limit=limit, offset=20)
+        self.a.root = r"\\offline-nas\changed\素材"
+        with self.assertRaisesRegex(ValueError, "素材库已切换"):
+            self.organizer.match({"keywords": ["门店"]}, offset=20)
+        self.assertEqual(before, self.state())
+
     def test_atomic_apply_new_script_manual_selection_reuse_and_idempotency(self):
         unrelated = self.a.categories.save({"name": "原有标签"})
         reused = self.a.categories.save({"name": "Demo"})

@@ -352,6 +352,10 @@ class ScriptOrganizer:
                     best[index].sort(key=lambda item: (-item["score"], _fold(item["relative_path"]), item["asset_id"]))
                     if len(best[index]) > limit:
                         best[index].pop()
+        self._hydrate(db, best)
+        return list(zip(best, totals))
+
+    def _hydrate(self, db, best):
         all_ids = sorted({item["asset_id"] for items in best for item in items})
         hydrated = self.service.categories.for_assets(all_ids, db=db)
         thumbs = {}
@@ -365,15 +369,58 @@ class ScriptOrganizer:
                 item["thumbnail"] = thumb["cache_path"] if thumb and thumb["file_hash"] == item["file_hash"] else ""
                 item["thumbnail_status"] = thumb["status"] if thumb and thumb["file_hash"] == item["file_hash"] else "pending"
                 item["categories"] = hydrated[item["asset_id"]]
-        return list(zip(best, totals))
 
-    def match(self, section, script_id=None, limit=20):
+    def _match_page(self, db, section, bound, limit, offset):
+        terms = self._section_terms(section)
+        if not terms and not bound:
+            return [], 0
+
+        def score(identity, name, path, category_names):
+            row = {"asset_id": identity, "name": name, "relative_path": path}
+            categories = [{"name": category_names}] if category_names else []
+            return self._score(row, categories, terms, bound)[0]
+
+        # Later pages must not retain the whole prefix in Python. Let SQLite
+        # spill its ordered working set to local temporary storage with a
+        # bounded cache, while retaining this same read-only index snapshot.
+        # Only the requested <=100 assets are hydrated into Python objects.
+        db.execute("PRAGMA temp_store=FILE")
+        db.execute("PRAGMA temp.cache_size=-2048")
+        db.create_function("organizer_score", 4, score, deterministic=True)
+        db.create_function("organizer_fold", 1, _fold, deterministic=True)
+        ranked = """WITH ranked AS (
+            SELECT a.*,organizer_score(a.asset_id,a.name,a.relative_path,(
+                SELECT group_concat(name,char(10)) FROM (
+                    SELECT c.name FROM category_memberships m JOIN category_entities c
+                    ON c.library_key=m.library_key AND c.category_id=m.category_id
+                    WHERE m.library_key=a.root_key AND m.asset_id=a.asset_id AND c.archived=0
+                    ORDER BY c.name_key,c.category_id
+                )
+            )) AS score FROM assets a WHERE a.root_key=?
+        ) """
+        total = db.execute(ranked + "SELECT count(*) FROM ranked WHERE score>0", (self.library_key,)).fetchone()[0]
+        if offset >= total:
+            return [], total
+        items = [dict(row) for row in db.execute(ranked + """SELECT * FROM ranked WHERE score>0
+            ORDER BY score DESC,organizer_fold(relative_path),asset_id LIMIT ? OFFSET ?""",
+            (self.library_key, limit, offset))]
+        self._hydrate(db, [items])
+        for item in items:
+            item["score"], item["reasons"] = self._score(item, item["categories"], terms, bound)
+        return items, total
+
+    def match(self, section, script_id=None, limit=20, offset=0):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("候选数量应为 1 至 100")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("候选分页偏移量不正确")
         with closing(self._connect(readonly=True)) as db:
             db.execute("BEGIN")
             script = self._script(db, script_id) if script_id else None
-            return self._match_many(db, [section], set(script["asset_ids"] if script else []), limit)[0]
+            bound = set(script["asset_ids"] if script else [])
+            if offset:
+                return self._match_page(db, section, bound, limit, offset)
+            return self._match_many(db, [section], bound, limit)[0]
 
     def plan(self, title, body, script_id=None, expected_heads=None):
         title, body = _title_body(title, body)

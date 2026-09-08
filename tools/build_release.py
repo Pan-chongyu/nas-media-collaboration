@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--publish", type=Path)
-    parser.add_argument("--notes", default="支持直接导入 Word 拍摄脚本；按编号和时间段生成分镜，保留镜头动作、人物台词及拍摄信息，可预览选材并确认分类")
+    parser.add_argument("--notes", default="优化素材整理器：分镜阅读区域可调，镜头和台词直接切换；候选支持加载更多，保留勾选、预览位置和滚动位置")
     parser.add_argument("--publish-only", action="store_true")
     args = parser.parse_args()
     match = re.search(r'^APP_VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "main.py").read_text(encoding="utf-8"), re.M)
