@@ -14,6 +14,7 @@ from PIL import Image
 
 from library import LibraryService
 from organizer_ui import OrganizerWindow, PAGE_SIZE, _cached_thumbnails
+from tests.test_script_import import write_docx
 
 
 SCRIPT = "镜头1：门店\n关键词：门店\n介绍门店外景。\n\n镜头2：厨房\n关键词：厨房\n厨师准备食物。"
@@ -211,8 +212,8 @@ class OrganizerUITests(unittest.TestCase):
         self.build()
         window.geometry("1000x700")
         window.select_suggestions()
-        for tab, widgets in ((window.source_tab, (window.body, window.build_button)),
-                             (window.review_tab, (window.section_tree, window.candidate_tree, window.review_button)),
+        for tab, widgets in ((window.source_tab, (window.body, window.build_button, window.import_button)),
+                             (window.review_tab, (window.section_tree, window.candidate_tree, window.review_button, window.detail_button)),
                              (window.result_tab, (window.summary_body, window.apply_button))):
             if tab is window.result_tab:
                 window.review_plan()
@@ -236,6 +237,74 @@ class OrganizerUITests(unittest.TestCase):
         records = [dict(asset_id="original", thumbnail=self.assets["门店外观.png"]["path"]),
                    dict(asset_id="smb", thumbnail=r"\\example\private\image.png")]
         self.assertEqual(_cached_thumbnails(records, self.service.cache_dir), {})
+
+    def test_import_word_uses_file_picker_then_groups_without_saving(self):
+        path = write_docx(self.base / "晚班交接.docx", '''
+            <w:p><w:r><w:t>01  0-8秒  门店开场</w:t></w:r></w:p>
+            <w:p><w:r><w:t>镜头：门店外观。</w:t></w:r></w:p>
+            <w:p><w:r><w:t>店长：准备交接。</w:t></w:r></w:p>
+            <w:p><w:r><w:t>02  9-20秒  厨房收尾</w:t></w:r></w:p>
+            <w:p><w:r><w:t>镜头：厨房特写。</w:t></w:r></w:p>
+            ''')
+        window = self.window
+        with patch("organizer_ui.filedialog.askopenfilename", return_value=str(path)) as dialog:
+            window.import_button.invoke()
+        self.assertEqual(dialog.call_count, 1)
+        self.pump(lambda: not window.busy)
+        self.assertEqual(window.title_var.get(), "晚班交接")
+        self.assertIn("已导入", window.source_note.get())
+        self.assertTrue(window.dirty())
+        self.assertEqual(window.body.cget("state"), "normal")
+        window.build_plan()
+        self.pump(lambda: window.plan is not None and not window.busy)
+        self.assertEqual(len(window.plan["sections"]), 2)
+        self.assertIn("店长：准备交接。", window.plan["sections"][0]["text"])
+        self.assertEqual(window.section_tree.item(window.plan["sections"][0]["section_id"], "values")[1], "0-8秒")
+        detail = window.show_section_details()
+        self.assertIn("店长：准备交接。", detail.text_views["人物台词"].get("1.0", "end-1c"))
+        self.assertNotIn("店长：", detail.text_views["镜头 / 动作"].get("1.0", "end-1c"))
+        detail.geometry("580x430")
+        self.app.update()
+        self.assertTrue(detail.close_button.winfo_ismapped())
+        self.assertLessEqual(detail.close_button.winfo_rooty() + detail.close_button.winfo_height(), detail.winfo_rooty() + detail.winfo_height())
+        detail.destroy()
+        self.assertTrue(all(section["candidates"] for section in window.plan["sections"]))
+        self.assertEqual(self.service.collaboration.list_records("script")[1], 0)
+        self.assertFalse(self.service.categories.list_records())
+
+    def test_import_failure_and_declined_discard_keep_previous_choices(self):
+        window = self.window
+        original = self.build()
+        window.select_suggestions()
+        before = window._snapshot()
+        with patch("organizer_ui.messagebox.askyesno", return_value=False), patch("organizer_ui.read_script_file") as reader:
+            window.import_script(self.base / "rejected.docx")
+            reader.assert_not_called()
+        with patch("organizer_ui.messagebox.askyesno", return_value=True):
+            window.import_script(self.base / "missing.docx")
+        self.pump(lambda: not window.busy)
+        self.assertIs(window.plan, original)
+        self.assertEqual(before, window._snapshot())
+        self.assertIn("原内容与勾选已保留", window.notice.get())
+
+    def test_edit_during_import_rejects_stale_result_and_import_blocks_apply(self):
+        window = self.window
+        release = threading.Event()
+
+        def reader(_path):
+            release.wait(4)
+            return dict(title="旧的导入结果", body="正文", source_name="fixture.docx", warnings=[])
+
+        with patch("organizer_ui.read_script_file", side_effect=reader):
+            window.import_script("fixture.docx")
+            window.title_var.set("读取期间的新草稿")
+            window.apply_plan()
+            self.assertFalse(window.saving)
+            release.set()
+            self.pump(lambda: not window.busy)
+        self.assertEqual(window.title_var.get(), "读取期间的新草稿")
+        self.assertIn("已保留原方案", window.notice.get())
+        self.assertIsNone(window.plan)
 
 
 if __name__ == "__main__":

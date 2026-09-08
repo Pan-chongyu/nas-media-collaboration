@@ -30,6 +30,14 @@ _STOP = frozenset(("镜头", "分镜", "场景", "段落", "画面", "拍摄", "
                    "这个", "那个", "可以", "进行", "使用", "最后", "首先", "接着", "视频", "素材", "关键词", "关键字",
                    "mp4", "mov", "jpg", "png", "jpeg", "wav", "mp3", "the", "and", "with", "from", "this", "that"))
 _SPLIT_STOP = re.compile("|".join(sorted((term for term in _STOP if re.search(r"[\u4e00-\u9fff]", term)), key=len, reverse=True)))
+_SHOT_NUMBER = re.compile(r"^\s*(?P<number>\d{1,3})(?:[.、)]\s*|\s+)(?P<rest>.+)$")
+_TIME_VALUE = r"[+-]?\d+(?::\d+){0,2}(?:\.\d+)?"
+_SHOT_TIME = re.compile(
+    rf"^\s*(?P<start>{_TIME_VALUE})\s*(?P<start_unit>秒|s)?\s*"
+    rf"[-–—~～至]\s*(?P<end>{_TIME_VALUE})(?P<end_unit>\s*(?:秒|s))?(?P<tail>.*)$", re.I)
+_VISUAL_LABEL = re.compile(r"^\s*(?:镜头(?:调度)?|分镜|画面|动作|行动|拍摄|景别|运镜|场景|表演)\s*(?:\d+)?\s*[:：]")
+_DIALOGUE_LABEL = re.compile(r"^\s*(?:(?:结尾|片尾|结束)字幕|(?:对白|对话|台词|旁白|独白|口播|字幕|文案)\s*(?:[:：]|$))")
+_SPEAKER_LABEL = re.compile(r"^\s*[\w\u4e00-\u9fff·]{1,16}(?:\s*[（(][^）)\r\n]{1,30}[）)])?\s*[:：]")
 
 
 def _fold(value):
@@ -86,10 +94,128 @@ def _section_title(text, index):
     return first[:60] if first else f"段落 {index}"
 
 
+def _section(title, text, index, heading, keywords):
+    identity = hashlib.sha256(f"{index}\0{text}".encode("utf-8")).hexdigest()
+    # Always reserve section numbering so long script titles cannot merge
+    # distinct section categories after the 40-character limit.
+    prefix = title[:14]
+    suffix = f" · {index:02d} {heading}"
+    category = prefix + suffix[:40 - len(prefix)]
+    return dict(section_id=identity, title=heading, text=text,
+                keywords=keywords, category_name=category)
+
+
+def _seconds(value, number):
+    parts = value.split(":")
+    error = f"第 {number} 镜的时间范围不正确，请使用非负秒数或 分:秒 格式"
+    # Bound numeric conversion independently of Python's integer-string limit.
+    if len(value) > 30 or value.startswith("-"):
+        raise ValueError(error)
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError:
+        raise ValueError(error) from None
+    if any(part < 0 for part in numbers) or any(part >= 60 for part in numbers[1:]):
+        raise ValueError(error)
+    total = sum(part * 60 ** power for power, part in enumerate(reversed(numbers)))
+    return int(total) if total.is_integer() else total
+
+
+def _timed_heading(line):
+    """Recognize numbered shot ranges, never a bare date or spoken timecode."""
+    line = unicodedata.normalize("NFKC", line.rstrip("\r\n"))
+    markdown = _MARKDOWN.match(line)
+    numbered = _SHOT_NUMBER.match(markdown.group(1) if markdown else line)
+    if not numbered:
+        return None
+    timed = _SHOT_TIME.match(numbered.group("rest"))
+    if not timed:
+        return None
+    # Plain numeric ranges without a unit are ambiguous list items or dates.
+    if not (timed.group("start_unit") or timed.group("end_unit") or ":" in timed.group("start") or ":" in timed.group("end")):
+        return None
+    tail = timed.group("tail")
+    if tail and not timed.group("end_unit") and tail[0] not in " \t:：|｜、":
+        return None
+    number = numbered.group("number")
+    start, end = _seconds(timed.group("start"), number), _seconds(timed.group("end"), number)
+    if end < start:
+        raise ValueError(f"第 {number} 镜的结束时间早于开始时间，请修正时间范围")
+    heading = tail.strip(" \t:：|｜、")[:60] or f"镜头 {number}"
+    return dict(shot_number=number, time_range=numbered.group("rest")[:timed.start("tail")].strip(),
+                start_seconds=start, end_seconds=end, title=heading)
+
+
+def _shooting_content(text):
+    """Keep direction/dialogue views separate; the original text remains intact."""
+    visual, dialogue = [], []
+    mode = "visual"
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped:
+            # A paragraph break ends an unlabeled dialogue continuation.
+            mode = "visual"
+            continue
+        if _KEYWORDS.match(stripped):
+            continue
+        if _VISUAL_LABEL.match(line) or stripped.startswith(("（", "(")):
+            mode = "visual"
+        elif _DIALOGUE_LABEL.match(line):
+            mode = "dialogue"
+        elif _SPEAKER_LABEL.match(line) or stripped.startswith(("“", '"', "「", "『")):
+            # A speaker's paragraph does not turn the following, unlabelled
+            # action paragraph into dialogue. Explicit subtitle/voiceover
+            # labels above may introduce a multi-line text block instead.
+            dialogue.append(line)
+            mode = "visual"
+            continue
+        (visual if mode == "visual" else dialogue).append(line)
+    return "".join(visual).strip(), "".join(dialogue).strip()
+
+
+def _timed_sections(title, body, lines):
+    shots, position = [], 0
+    for line in lines:
+        heading = _timed_heading(line)
+        if heading:
+            shots.append((position, position + len(line), heading))
+        position += len(line)
+    if not shots:
+        return None
+    if len(shots) > MAX_SECTIONS:
+        raise ValueError("脚本最多拆分为 50 个分镜或段落，请分批整理")
+    context = body[:shots[0][0]]
+    sections = []
+    for index, (start, content_start, heading) in enumerate(shots, 1):
+        end = shots[index][0] if index < len(shots) else len(body)
+        content = body[content_start:end]
+        visual, dialogue = _shooting_content(content)
+        # Explicit keywords outrank all inferred terms. Otherwise the shooting
+        # directions provide evidence, not a character's unrelated dialogue or
+        # document-level character/genre metadata.
+        explicit = [line for line in content.splitlines() if _KEYWORDS.match(line.strip())]
+        keywords = _extract_keywords("", "\n".join(explicit)) if explicit else _extract_keywords("", visual)
+        if not keywords and not visual and not explicit:
+            keywords = _extract_keywords(heading["title"], "")
+        section = _section(title, body[0 if index == 1 else start:end], index, heading["title"], keywords)
+        section.update(heading, format="timed_shooting", visual_text=visual, dialogue_text=dialogue,
+                       context_text=context)
+        sections.append(section)
+    return sections
+
+
 def parse_script(title, body):
-    """Split headings/paragraphs without discarding any source-body characters."""
+    """Split shooting ranges or ordinary sections, preserving every body character.
+
+    A numbered, explicit time range takes precedence over the inner 镜头/画面
+    labels. Timed sections also expose shot/time/direction/dialogue/context
+    fields for preview; these are derived views, not changes to the script.
+    """
     title, body = _title_body(title, body)
     lines = body.splitlines(keepends=True)
+    timed = _timed_sections(title, body, lines)
+    if timed is not None:
+        return timed
     starts = []
     position = 0
     for line in lines:
@@ -121,14 +247,7 @@ def parse_script(title, body):
     sections = []
     for index, text in enumerate(texts, 1):
         heading = _section_title(text, index)
-        identity = hashlib.sha256(f"{index}\0{text}".encode("utf-8")).hexdigest()
-        # Always reserve section numbering so long script titles cannot merge
-        # distinct section categories after the 40-character limit.
-        prefix = title[:14]
-        suffix = f" · {index:02d} {heading}"
-        category = prefix + suffix[:40 - len(prefix)]
-        sections.append(dict(section_id=identity, title=heading, text=text,
-                             keywords=_extract_keywords(heading, text), category_name=category))
+        sections.append(_section(title, text, index, heading, _extract_keywords(heading, text)))
     return sections
 
 

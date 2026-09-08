@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 import traceback
 import tkinter as tk
+from zipfile import ZipFile
 
 from PIL import Image
 
@@ -40,13 +41,31 @@ def run_smoke(app, report_path: Path):
                 app.service = LibraryService(app.data_dir, str(media), app.settings["sync_root"], app.settings["device_id"])
                 assert app.service.scan()["changed"] == 3
                 state["window"] = window = app.open_organizer()
-                window.title_var.set("门店短片")
-                window.body.insert("1.0", "# 门店外景\n关键词：门店外景\n拍摄门店外景。\n\n# 人物采访\n关键词：人物采访\n记录人物采访。")
+                source = app.data_dir / "门店短片.docx"
+                with ZipFile(source, "w") as archive:
+                    archive.writestr("word/document.xml", '''<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+                    <w:p><w:r><w:t>拍摄场景：门店</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>01  0-8秒  门店外景</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>镜头：门店外景。</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>店长：欢迎光临。</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>02  9-20秒  人物采访</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>镜头：人物采访。</w:t></w:r></w:p>
+                    </w:body></w:document>''')
+                window.import_script(source)
+                state["step"] = "import"
+            elif step == "import" and not state["window"].busy:
+                window = state["window"]
+                assert window.title_var.get() == "门店短片"
+                assert "店长：欢迎光临。" in window.body.get("1.0", "end-1c")
+                assert window.dirty()
+                checks.append("word_script_import")
                 window.build_plan()
                 state["step"] = 1
             elif step == 1 and state["window"].plan:
                 window = state["window"]
                 assert len(window.plan["sections"]) == 2
+                assert [section["shot_number"] for section in window.plan["sections"]] == ["01", "02"]
+                assert window.plan["sections"][1]["time_range"] == "9-20秒"
                 assert all(section["candidates"] for section in window.plan["sections"])
                 assert not app.service.categories.list_records()
                 checks.append("script_sections_and_local_matches")

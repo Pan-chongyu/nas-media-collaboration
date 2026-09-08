@@ -8,18 +8,27 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
 from collaboration_ui import _text, _set_text
 from organizer import ScriptOrganizer
+from script_import import read_script_file
 
 
 PAGE_SIZE = 30
 BG = "#f1f4f7"
 FG = "#172738"
 MUTED = "#748293"
+
+
+def _section_preview_text(section):
+    text = section.get("text", "")
+    context = section.get("context_text", "")
+    if section.get("format") == "timed_shooting" and context and text.startswith(context):
+        return text[len(context):]
+    return text
 
 
 def _perform(operation, results, identity):
@@ -114,7 +123,7 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self._reviewed = None
         self._images = {}
         self.title_var = tk.StringVar(self)
-        self.source_note = tk.StringVar(self, value="粘贴脚本，或选择已保存的脚本")
+        self.source_note = tk.StringVar(self, value="导入 Word 拍摄脚本、粘贴正文，或选择已保存的脚本")
         self.category_var = tk.StringVar(self)
         self.keywords_var = tk.StringVar(self)
         self.section_note = tk.StringVar(self)
@@ -173,16 +182,20 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         parent.rowconfigure(4, weight=1)
         toolbar = ttk.Frame(parent)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 13))
+        self.import_button = ttk.Button(toolbar, text="导入 Word 脚本", style="Primary.TButton", command=self.import_script)
+        self.import_button.pack(side="left", padx=(0, 8))
         self.picker_button = ttk.Button(toolbar, text="选择已保存脚本", command=self.open_script_picker)
         self.picker_button.pack(side="left")
         self.new_button = ttk.Button(toolbar, text="新建脚本", command=self.new_script)
         self.new_button.pack(side="left", padx=8)
         self.copy_button = ttk.Button(toolbar, text="复制为新脚本", command=self.copy_script, state="disabled")
         self.copy_button.pack(side="left")
-        ttk.Label(parent, textvariable=self.source_note, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 10))
+        source_label = ttk.Label(parent, textvariable=self.source_note, style="Muted.TLabel", wraplength=900)
+        source_label.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        source_label.bind("<Configure>", lambda event: source_label.configure(wraplength=max(150, event.width)))
         self.title_entry = ttk.Entry(parent, textvariable=self.title_var, font=("Microsoft YaHei UI", 12))
         self.title_entry.grid(row=2, column=0, sticky="ew")
-        ttk.Label(parent, text="脚本标题 · 段落之间空一行，也支持“镜头 1 / 场景 2”和 Markdown 标题",
+        ttk.Label(parent, text="脚本标题 · 支持“01  0-7秒  开场”、镜头编号和 Markdown 标题",
                   style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=(5, 9))
         frame, self.body = _text(parent, height=12)
         frame.grid(row=4, column=0, sticky="nsew")
@@ -201,10 +214,12 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         groups.rowconfigure(1, weight=1)
         groups.columnconfigure(0, weight=1)
         ttk.Label(groups, text="脚本分组", font=("Microsoft YaHei UI", 11, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.section_tree = ttk.Treeview(groups, columns=("title", "count"), show="headings", selectmode="browse", height=7)
+        self.section_tree = ttk.Treeview(groups, columns=("title", "time", "count"), show="headings", selectmode="browse", height=7)
         self.section_tree.heading("title", text="分组")
+        self.section_tree.heading("time", text="时间段")
         self.section_tree.heading("count", text="已选")
-        self.section_tree.column("title", width=165, minwidth=100, stretch=True)
+        self.section_tree.column("title", width=150, minwidth=90, stretch=True)
+        self.section_tree.column("time", width=86, minwidth=70, stretch=False)
         self.section_tree.column("count", width=46, minwidth=38, stretch=False)
         self.section_tree.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(groups, command=self.section_tree.yview)
@@ -263,6 +278,8 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         self.review_button = ttk.Button(footer, text="检查分类结果 →", style="Primary.TButton", command=self.review_plan)
         self.review_button.pack(side="right")
         ttk.Button(footer, text="预览所选", command=self.preview_selected).pack(side="right", padx=8)
+        self.detail_button = ttk.Button(footer, text="分镜详情", command=self.show_section_details)
+        self.detail_button.pack(side="right")
 
     def _build_result(self):
         parent = self.result_tab
@@ -348,6 +365,41 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         if not self.saving and not self.busy:
             return ScriptPicker(self)
 
+    def import_script(self, path=None):
+        if self.saving or self.busy or not self._same_library():
+            return
+        if path is None:
+            path = filedialog.askopenfilename(parent=self, title="导入 Word 拍摄脚本",
+                filetypes=[("Word 文档", "*.docx")])
+        if not path or not self._replace_allowed():
+            return
+        snapshot = self._snapshot()
+        self.busy = True
+        self.import_button.state(["disabled"])
+        self.notice.set("正在读取 Word 脚本…")
+        source_path = str(path)
+
+        def loaded(result):
+            self.busy = False
+            self.import_button.state(["!disabled"])
+            if not self._same_library():
+                return
+            if self._snapshot() != snapshot:
+                self.notice.set("读取期间当前内容有修改，已保留原方案；请再次点击导入。")
+                return
+            self._reset_source(result["title"], result["body"])
+            self._baseline = (("", ""), None, [])
+            self.source_note.set("已导入：" + result["source_name"] + " · 正文与表格文字可编辑，排版不保留")
+            notes = " ".join(result["warnings"])
+            self.notice.set((notes + " " if notes else "") + "请核对正文，再点击“生成整理方案”。导入内容尚未保存。")
+
+        def failed(error):
+            self.busy = False
+            self.import_button.state(["!disabled"])
+            self.notice.set("导入未完成，原内容与勾选已保留：" + error)
+
+        self._run(lambda: read_script_file(source_path), loaded, failed)
+
     def build_plan(self):
         if self.saving or self.busy or not self._same_library():
             return
@@ -407,7 +459,8 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         selected = self.section_tree.selection()
         self.section_tree.delete(*self.section_tree.get_children())
         for section in self.plan["sections"]:
-            self.section_tree.insert("", "end", iid=section["section_id"], values=(section["title"], len(section.get("selected_ids", []))))
+            heading = (section["shot_number"] + "  " if section.get("shot_number") else "") + section["title"]
+            self.section_tree.insert("", "end", iid=section["section_id"], values=(heading, section.get("time_range", "—"), len(section.get("selected_ids", []))))
         if selected and self.section_tree.exists(selected[0]):
             self.section_tree.selection_set(selected[0])
         sections = [section for section in self.plan["sections"] if section.get("selected_ids")]
@@ -423,7 +476,7 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         section = self._section()
         self.category_var.set(section.get("category_name", ""))
         self.keywords_var.set("、".join(section.get("keywords", [])))
-        _set_text(self.section_body, section.get("text", ""), readonly=True)
+        _set_text(self.section_body, _section_preview_text(section), readonly=True)
         self._render_candidates()
 
     def _render_candidates(self):
@@ -574,6 +627,45 @@ class OrganizerWindow(_Jobs, tk.Toplevel):
         selected = self.candidate_tree.selection()
         if selected and not self.saving:
             self.preview_asset(selected[0])
+
+    def show_section_details(self):
+        section = self._section()
+        if not section:
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("分镜详情 · " + section["title"])
+        dialog.geometry("780x580")
+        dialog.minsize(580, 430)
+        dialog.transient(self)
+        dialog.configure(bg=BG)
+        outer = ttk.Frame(dialog, padding=18)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+        title = ttk.Label(outer, text=section["title"], font=("Microsoft YaHei UI", 15, "bold"), wraplength=700)
+        title.grid(row=0, column=0, sticky="ew")
+        title.bind("<Configure>", lambda event: title.configure(wraplength=max(150, event.width)))
+        if section.get("time_range"):
+            ttk.Label(outer, text="分镜 " + section["shot_number"] + " · " + section["time_range"], style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 10))
+        tabs = ttk.Notebook(outer, style="Organizer.TNotebook")
+        tabs.grid(row=2, column=0, sticky="nsew", pady=8)
+        views = [("完整分镜", _section_preview_text(section))]
+        if section.get("format") == "timed_shooting":
+            views.extend((("镜头 / 动作", section.get("visual_text", "")),
+                          ("人物台词", section.get("dialogue_text", "")),
+                          ("拍摄信息", section.get("context_text", ""))))
+        dialog.text_views = {}
+        for label, content in views:
+            page = ttk.Frame(tabs, padding=10)
+            tabs.add(page, text=label)
+            frame, body = _text(page, height=15, readonly=True)
+            frame.pack(fill="both", expand=True)
+            _set_text(body, content or "本段没有单独标注此项内容，请查看完整分镜。", readonly=True)
+            dialog.text_views[label] = body
+        dialog.close_button = ttk.Button(outer, text="关闭", command=dialog.destroy)
+        dialog.close_button.grid(row=3, column=0, sticky="e", pady=(8, 0))
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        return dialog
 
     def preview_asset(self, identity):
         self._flush_section()
