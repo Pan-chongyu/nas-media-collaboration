@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -192,6 +193,26 @@ class WorkspaceTests(unittest.TestCase):
         self.app._step_asset(-1)
         self._pump_until(lambda: self.app.page_number == 0 and self.app._pending_preview is None and self.app.selected_id in {r["asset_id"] for r in self.app.records})
         self.assertEqual(self.app.selected_id, self.app.records[-1]["asset_id"])
+
+    def test_linked_preview_keeps_draft_and_exit_can_be_cancelled(self):
+        asset = self.app.records[0]
+        self.app.show_page("脚本")
+        page = self.app.collaboration_page
+        editor = page.open_editor(asset_id=asset["asset_id"], asset_name=asset["name"])
+        editor.title_var.set("尚未保存的脚本")
+        editor.body.insert("1.0", "预览时保留的正文")
+        self.app.preview_asset_id(asset["asset_id"])
+        self._pump_until(lambda: self.app.active_page == "素材库" and self.app.selected_id == asset["asset_id"])
+        self.assertTrue(editor.winfo_exists())
+        self.assertEqual(editor.body.get("1.0", "end-1c"), "预览时保留的正文")
+        with patch("main.messagebox.askyesno", return_value=False) as question:
+            self.app.close()
+            question.assert_called_once()
+            self.assertFalse(self.app.stop_event.is_set())
+        editor.save()
+        self._pump_until(lambda: editor.result is not None)
+        self.assertEqual(self.app.service.collaboration.get(editor.result["entity_id"])["asset_ids"], [asset["asset_id"]])
+        editor.close()
 
 
 if __name__ == "__main__":

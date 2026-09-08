@@ -55,7 +55,7 @@ def build(version: str, output: Path) -> Path:
     if not (compiler.parent / "Languages/ChineseSimplified.isl").is_file():
         raise RuntimeError("Inno Setup 缺少 ChineseSimplified.isl 中文语言文件")
     from importlib.metadata import version as package_version
-    for package, expected in (("PyInstaller", "6.22.2"), ("Pillow", "12.3.0")):
+    for package, expected in (("PyInstaller", "6.22.2"), ("Pillow", "12.3.0"), ("tkinterdnd2", "0.4.3")):
         if package_version(package) != expected:
             raise RuntimeError(f"构建需要 {package}=={expected}")
     target = ROOT / "build" / version
@@ -64,7 +64,7 @@ def build(version: str, output: Path) -> Path:
                  "--name", APP_NAME, "--distpath", str(target / "dist"),
                  "--workpath", str(target / "work"), "--specpath", str(target),
                  "--add-binary", f"{ffmpeg};tools", "--add-binary", f"{mpv};tools",
-                 "--add-data", f"{ROOT / 'docs/licenses'};licenses"]
+                 "--add-data", f"{ROOT / 'docs/licenses'};licenses", "--collect-data", "tkinterdnd2"]
     companion = mpv.parent / "d3dcompiler_43.dll"
     if companion.is_file():
         arguments += ["--add-binary", f"{companion};tools"]
@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument("--version")
     parser.add_argument("--output", type=Path, default=Path("dist"))
     parser.add_argument("--publish", type=Path)
-    parser.add_argument("--notes", default="全新素材预览界面：可调整大画面、清晰进度与音量、双击播放和连续预览")
+    parser.add_argument("--notes", default="新增脚本与工单、素材绑定和关联预览；多人版本同步与冲突处理；支持素材文件拖出到剪辑软件")
     parser.add_argument("--publish-only", action="store_true")
     args = parser.parse_args()
     match = re.search(r'^APP_VERSION = "(\d+\.\d+\.\d+)"', (ROOT / "main.py").read_text(encoding="utf-8"), re.M)

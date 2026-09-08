@@ -53,12 +53,12 @@ def main():
             installed = target / original.relative_to(source)
             assert installed.is_file() and digest(installed) == digest(original), str(installed)
             checked += 1
-    for extra in ([], ["--player"]):
+    for extra in ([], ["--player"], ["--collaboration"]):
         subprocess.run([sys.executable, str(ROOT / "tools/run_frozen_smoke.py"),
                         "--exe", str(target / "素材协作.exe"), *extra], cwd=ROOT, check=True, timeout=90)
     report = {"version": version, "installer": str(installer), "sha256": digest(installer),
               "installed_to": str(target), "files_verified": checked,
-              "live_registration_unchanged": True, "startup": "passed", "player": "passed"}
+              "live_registration_unchanged": True, "startup": "passed", "player": "passed", "collaboration": "passed"}
     destination = ROOT / "build/verification" / f"installer-{version}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

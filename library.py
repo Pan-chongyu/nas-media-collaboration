@@ -19,6 +19,7 @@ from indexer import (
 )
 from media import generate_thumbnail
 from sync_events import Event, append_event, read_events
+from collaboration_store import CollaborationStore, ENTITY_TYPE as COLLABORATION_ENTITY_TYPE
 
 
 def utc_now() -> str:
@@ -68,8 +69,21 @@ class LibraryService:
                     attempts INTEGER NOT NULL, next_retry REAL NOT NULL, error TEXT NOT NULL,
                     PRIMARY KEY(library_key, event_id)
                 );
+                CREATE TABLE IF NOT EXISTS unsupported_events (
+                    library_key TEXT NOT NULL, event_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL, received_at TEXT NOT NULL,
+                    PRIMARY KEY(library_key,event_id)
+                );
             """)
+            # 0.3.x acknowledged unknown event types without preserving them. Replay
+            # the old inbox once on upgrade to recover collaboration revisions.
+            key = root_key(self.root)
+            replay_key = f"collaboration_inbox_v1:{key}"
+            if not db.execute("SELECT 1 FROM app_state WHERE key=?", (replay_key,)).fetchone():
+                db.execute("DELETE FROM inbox WHERE library_key=?", (key,))
+                self._state(db, replay_key, utc_now())
             db.commit()
+        self.collaboration = CollaborationStore(self.db_path, key, device_id)
 
     def _state(self, db, key: str, value: str) -> None:
         db.execute("INSERT INTO app_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
@@ -241,10 +255,10 @@ class LibraryService:
 
     def sync_once(self, stop: threading.Event | None = None) -> dict:
         if not self._sync_lock.acquire(blocking=False):
-            return {"status": "busy", "sent": 0, "received": 0, "changed": 0}
+            return {"status": "busy", "sent": 0, "received": 0, "changed": 0, "metadata_changed": 0}
         stop = stop or threading.Event()
         key = root_key(self.root)
-        sent = received = changed = rejected = 0
+        sent = received = changed = rejected = metadata_changed = 0
         try:
             shared = Path(self.sync_root)
             if not self.sync_root.strip():
@@ -280,32 +294,41 @@ class LibraryService:
                         break
                     records = []
                     remaining, retry_error = [], ""
+                    collaboration = event.entity_type == COLLABORATION_ENTITY_TYPE and event.payload.get("library_key") == key
+                    supported_asset = event.entity_type == "asset_batch" and event.operation == "upsert" and event.payload.get("library_key") == key
                     try:
-                        if event.entity_type == "asset_batch" and event.operation == "upsert" and event.payload.get("library_key") == key:
+                        if supported_asset:
                             payloads = event.payload.get("records")
                             if event.payload.get("schema") != 1 or not isinstance(payloads, list) or len(payloads) > 100:
                                 raise ValueError("不支持的素材事件格式")
                             records, remaining, retry_error = self._resolve_records(payloads)
+                        with db:
+                            db.execute("BEGIN IMMEDIATE")
+                            applied_metadata = self.collaboration.apply_event(event, db=db) if collaboration else False
+                            applied_assets = upsert_records(db, records, commit=False)
+                            self._defer(db, key, event.event_id, remaining, retry_error)
+                            if not collaboration and not supported_asset and event.payload.get("library_key") == key:
+                                db.execute("INSERT OR IGNORE INTO unsupported_events VALUES(?,?,?,?)",
+                                           (key, event.event_id, json.dumps(event.to_dict(), ensure_ascii=False), utc_now()))
+                            db.execute("INSERT OR IGNORE INTO inbox VALUES(?,?,?)", (key, event.event_id, utc_now()))
+                        changed += applied_assets
+                        metadata_changed += int(applied_metadata)
                     except (ValueError, TypeError) as exc:
                         with db:
                             db.execute("INSERT OR IGNORE INTO rejected_events VALUES(?,?,?)", (event.event_id, str(exc), utc_now()))
                             db.execute("INSERT OR IGNORE INTO inbox VALUES(?,?,?)", (key, event.event_id, utc_now()))
                         rejected += 1
                         continue
-                    with db:
-                        changed += upsert_records(db, records, commit=False)
-                        self._defer(db, key, event.event_id, remaining, retry_error)
-                        db.execute("INSERT OR IGNORE INTO inbox VALUES(?,?,?)", (key, event.event_id, utc_now()))
                     received += 1
                 deferred = db.execute("SELECT count(*) FROM deferred_events WHERE library_key=?", (key,)).fetchone()[0]
                 with db:
                     self._state(db, "last_sync", utc_now())
                     self._state(db, "sync_error", "")
-            return {"status": "done", "sent": sent, "received": received, "changed": changed, "rejected": rejected, "deferred": deferred}
+            return {"status": "done", "sent": sent, "received": received, "changed": changed, "metadata_changed": metadata_changed, "rejected": rejected, "deferred": deferred}
         except Exception as exc:
             with closing(open_index(self.db_path)) as db, db:
                 self._state(db, "sync_error", str(exc))
-            return {"status": "offline", "sent": sent, "received": received, "changed": changed, "error": str(exc)}
+            return {"status": "offline", "sent": sent, "received": received, "changed": changed, "metadata_changed": metadata_changed, "error": str(exc)}
         finally:
             self._sync_lock.release()
 

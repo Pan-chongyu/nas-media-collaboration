@@ -1,3 +1,4 @@
 # 运行时依赖
 Pillow==12.3.0
+tkinterdnd2==0.4.3
 # 构建电脑还需：python -m pip install PyInstaller==6.22.2

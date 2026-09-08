@@ -24,10 +24,11 @@ from library import LibraryService
 from media import _ffmpeg
 from player import MediaPlayer, PlayerError
 from ui_controls import TimelineScale
+from file_transfer import DragDropRoot, register_file_drag
 
 
 APP_NAME = "素材协作"
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.4.0"
 DEFAULT_ROOT = r"\\SmartStorage\新媒体-137964276\素材库"
 DEFAULT_SYNC_ROOT = r"\\SmartStorage\新媒体-137964276\素材协作数据"
 DEFAULT_PUBLISH_ROOT = r"\\SmartStorage\新媒体-137964276\软件库\素材协作"
@@ -66,7 +67,8 @@ def short_time(value: str) -> str:
 
 def load_settings(path: Path) -> dict:
     defaults = dict(nas_root=DEFAULT_ROOT, sync_root=DEFAULT_SYNC_ROOT, publish_root=DEFAULT_PUBLISH_ROOT,
-                    nas_user="nas", auto_sync=True, device_id="node-" + uuid.uuid4().hex[:16])
+                    nas_user="nas", auto_sync=True, display_name=os.getenv("USERNAME", ""),
+                    device_id="node-" + uuid.uuid4().hex[:16])
     try:
         previous = json.loads(path.read_text(encoding="utf-8-sig"))
         if isinstance(previous, dict):
@@ -91,7 +93,7 @@ def store_settings(path: Path, settings: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-class Workspace(tk.Tk):
+class Workspace(DragDropRoot):
     def __init__(self, data_dir: Path | None = None, auto_sync: bool = True):
         super().__init__()
         self.title(f"{APP_NAME}  {APP_VERSION}")
@@ -136,6 +138,8 @@ class Workspace(tk.Tk):
         self._split_fraction = 0.60
         self._split_ready = False
         self._pending_preview = None
+        self._pending_asset_id = None
+        self.collaboration_page = None
         self._reload_after = self._resize_after = self._search_after = None
         self._status = tk.StringVar(value="本地索引就绪")
         self._scan_status = tk.StringVar(value="尚未扫描")
@@ -220,6 +224,7 @@ class Workspace(tk.Tk):
         self.image_refs.clear()
         self.thumb_widgets.clear()
         self.card_widgets.clear()
+        self.collaboration_page = None
         for child in self.page.winfo_children():
             child.destroy()
         for page, button in self.nav.items():
@@ -230,6 +235,10 @@ class Workspace(tk.Tk):
             self._tasks_page()
         elif name == "设置":
             self._settings_page()
+        elif name in {"脚本", "工单"}:
+            from collaboration_ui import CollaborationPage
+            self.collaboration_page = CollaborationPage(self.page, self, "script" if name == "脚本" else "work_order")
+            self.collaboration_page.pack(fill="both", expand=True)
         else:
             ttk.Label(self.page, text=name, style="Title.TLabel").pack(anchor="w", pady=(0, 20))
             ttk.Label(self.page, text="暂无记录", style="Muted.TLabel").pack(anchor="center", pady=80)
@@ -338,10 +347,16 @@ class Workspace(tk.Tk):
         self.preview_meta.pack(fill="x")
         preview_actions = self.preview_actions = ttk.Frame(preview, style="Preview.TFrame")
         preview_actions.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 14))
-        for label, tooltip, command in (("复制路径", "复制剪辑路径 Ctrl+C", self._copy_path), ("外部打开", "使用系统默认程序打开", self._open_asset), ("刷新封面", "重新生成缩略图", self._retry_thumbnail)):
+        for label, tooltip, command in (("绑定脚本", "绑定已有脚本或新建脚本", lambda: self._asset_collaboration("script")), ("新建工单", "为当前素材创建工单", lambda: self._asset_collaboration("work_order"))):
             button = ttk.Button(preview_actions, text=label, style="Preview.TButton", command=command)
             button.pack(side="left", padx=(0, 6))
             self._tooltip(button, tooltip)
+        more_menu = tk.Menu(preview_actions, tearoff=False)
+        more_menu.add_command(label="复制剪辑路径", command=self._copy_path)
+        more_menu.add_command(label="使用系统程序打开", command=self._open_asset)
+        more_menu.add_command(label="重新生成封面", command=self._retry_thumbnail)
+        more = tk.Menubutton(preview_actions, text="更多 ▾", menu=more_menu, bg="#233449", fg="#e3ebf5", activebackground="#314a62", activeforeground="white", padx=8, pady=8, bd=0)
+        more.pack(side="right")
         self.preview_panel.bind("<Configure>", self._preview_panel_resized)
         self.asset_canvas = tk.Canvas(self.library_surface, bg=BG, highlightthickness=0)
         self.asset_scrollbar = ttk.Scrollbar(self.library_surface, orient="vertical", command=self.asset_canvas.yview)
@@ -363,6 +378,7 @@ class Workspace(tk.Tk):
             self.asset_tree.column(name, width=width, minwidth=width if name != "name" else 140, stretch=name == "name")
         self.asset_tree.bind("<<TreeviewSelect>>", self._list_selection)
         self.asset_tree.bind("<Double-1>", lambda _event: self._play_asset(self.selected_id))
+        register_file_drag(self.asset_tree, self._tree_drag_paths, started=self._drag_started, finished=self._drag_finished)
         bottom = ttk.Frame(self.page)
         bottom.pack(side="bottom", fill="x", pady=(10, 0), before=self.work_split)
         self.previous_button = ttk.Button(bottom, text="上一页", style="Compact.TButton", command=lambda: self._turn_page(-1))
@@ -371,7 +387,7 @@ class Workspace(tk.Tk):
         self.next_button.pack(side="left", padx=6)
         self.page_label = ttk.Label(bottom, text="", style="Muted.TLabel")
         self.page_label.pack(side="left", padx=8)
-        ttk.Label(bottom, text="双击播放 · 空格暂停 · F 全屏", style="Muted.TLabel").pack(side="right")
+        ttk.Label(bottom, text="拖出卡片到剪辑 · 双击播放 · F 全屏" if self.dnd_version else "双击播放 · 空格暂停 · F 全屏", style="Muted.TLabel").pack(side="right")
         self._empty_preview()
         self._set_view(self.view_mode)
         self._request_page()
@@ -573,6 +589,7 @@ class Workspace(tk.Tk):
                 for widget in (frame, label, title, meta, badge):
                     widget.bind("<Button-1>", lambda _event, identity=asset_id: (self.focus_set(), self._select(identity)))
                     widget.bind("<Double-1>", lambda _event, identity=asset_id: self._play_asset(identity))
+                    register_file_drag(widget, lambda _event, record=item: [record["path"]], started=self._drag_started, finished=self._drag_finished)
                 self.thumb_widgets[asset_id] = label
                 self.card_widgets[asset_id] = frame
                 self.card_shapes[asset_id] = (width - 4, height)
@@ -713,6 +730,43 @@ class Workspace(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(item["path"])
             self._status.set("已复制：" + item["name"])
+
+    def _tree_drag_paths(self, event):
+        identity = self.asset_tree.identify_row(event.y_root - self.asset_tree.winfo_rooty())
+        item = next((record for record in self.records if record["asset_id"] == identity), None)
+        if item:
+            self.asset_tree.selection_set(identity)
+            self._select(identity, autoplay=False)
+        return [item["path"]] if item else []
+
+    def _drag_started(self, paths):
+        self._status.set("将素材拖到剪辑软件的素材或项目面板")
+
+    def _drag_finished(self, action):
+        self._status.set("目标软件已接收文件拖拽" if action == "copy" else "已取消拖拽")
+
+    def _asset_collaboration(self, kind):
+        item = self._selected()
+        if not item:
+            self._status.set("请先选择一个素材")
+            return
+        self.show_page("脚本" if kind == "script" else "工单")
+        if kind == "script":
+            self.collaboration_page.bind_asset(item["asset_id"], item["name"])
+        else:
+            self.collaboration_page.open_editor(asset_id=item["asset_id"], asset_name=item["name"])
+
+    def preview_asset_id(self, identity):
+        service = self.service
+        def find():
+            from contextlib import closing
+            from indexer import get_record, open_index, root_key
+            with closing(open_index(service.db_path)) as db:
+                record = get_record(db, identity)
+            if record is None or record.root_key != root_key(service.root):
+                raise ValueError("本机尚未索引这个素材，请先同步或扫描 NAS")
+            return service, record
+        self._background("linked_asset", find)
 
     def _open_asset(self, identity=None):
         if identity:
@@ -928,6 +982,8 @@ class Workspace(tk.Tk):
     def _reload(self):
         self._reload_after = None
         self._request_page()
+        if self.collaboration_page is not None:
+            self.collaboration_page.refresh()
         self._request_overview()
 
     def _scan_nas(self):
@@ -1020,14 +1076,14 @@ class Workspace(tk.Tk):
         self.setting_vars = {}
         form = ttk.Frame(self.page)
         form.pack(fill="x")
-        for i, (key, label) in enumerate((("nas_root", "素材根目录"), ("sync_root", "协作数据目录"), ("publish_root", "软件发布目录"), ("device_id", "本机节点 ID"))):
-            ttk.Label(form, text=label).grid(row=i * 2, column=0, sticky="w", pady=(12, 4))
+        for i, (key, label) in enumerate((("nas_root", "素材根目录"), ("sync_root", "协作数据目录"), ("publish_root", "软件发布目录"), ("display_name", "协作显示名"), ("device_id", "本机节点 ID"))):
+            ttk.Label(form, text=label).grid(row=i, column=0, sticky="w", padx=(0, 16), pady=12)
             variable = tk.StringVar(value=self.settings.get(key, ""))
             self.setting_vars[key] = variable
-            ttk.Entry(form, textvariable=variable, width=72).grid(row=i * 2 + 1, column=0, sticky="ew", ipady=3)
-            if key != "device_id":
-                ttk.Button(form, text="浏览", command=lambda value=variable: self._browse_directory(value)).grid(row=i * 2 + 1, column=1, padx=(8, 0))
-        form.columnconfigure(0, weight=1)
+            ttk.Entry(form, textvariable=variable, width=60).grid(row=i, column=1, sticky="ew", ipady=3)
+            if key.endswith("_root"):
+                ttk.Button(form, text="浏览", command=lambda value=variable: self._browse_directory(value)).grid(row=i, column=2, padx=(8, 0))
+        form.columnconfigure(1, weight=1)
         self.autosync_var = tk.BooleanVar(value=self.settings.get("auto_sync", True))
         ttk.Checkbutton(self.page, text="自动同步", variable=self.autosync_var).pack(anchor="w", pady=22)
         commands = ttk.Frame(self.page)
@@ -1051,6 +1107,9 @@ class Workspace(tk.Tk):
         updated.update({key: variable.get().strip() for key, variable in self.setting_vars.items()})
         if any(not updated[key] for key in ("nas_root", "sync_root", "publish_root")):
             messagebox.showerror(APP_NAME, "目录不能为空")
+            return
+        if not updated["display_name"] or len(updated["display_name"]) > 100 or any(ord(char) < 32 for char in updated["display_name"]):
+            messagebox.showerror(APP_NAME, "请填写 1–100 字的协作显示名")
             return
         try:
             service = LibraryService(self.data_dir, updated["nas_root"], updated["sync_root"], updated["device_id"])
@@ -1123,6 +1182,19 @@ class Workspace(tk.Tk):
                         index = self._pending_preview[1]
                         self._pending_preview = None
                         self._play_asset(self.records[index]["asset_id"])
+                    if self._pending_asset_id and any(item["asset_id"] == self._pending_asset_id for item in self.records):
+                        identity, self._pending_asset_id = self._pending_asset_id, None
+                        self._play_asset(identity)
+            elif kind == "linked_asset":
+                service, record = value
+                if service is self.service:
+                    self.show_page("素材库")
+                    self._pending_asset_id = record.asset_id
+                    self.search_var.set(record.relative_path)
+                    if self._search_after:
+                        self.after_cancel(self._search_after)
+                        self._search_after = None
+                    self._request_page(reset=True)
             elif kind == "thumbnail":
                 service, result = value
                 if service is self.service and self.active_page == "素材库":
@@ -1157,9 +1229,11 @@ class Workspace(tk.Tk):
                     self._status.set(value.get("error", "NAS 暂不可用"))
                 else:
                     self._sync_status.set("同步完成")
-                    self._status.set(f"同步：发出 {value['sent']} 批 / 收到 {value['received']} 批 / 更新 {value['changed']} 个素材")
+                    self._status.set(f"同步：发出 {value['sent']} 批 / 收到 {value['received']} 批 / 更新 {value['changed']} 个素材 · {value.get('metadata_changed', 0)} 条协作版本")
                     if value["changed"]:
                         self._request_page()
+                    if self.collaboration_page is not None and value["received"]:
+                        self.collaboration_page.refresh()
                 self._request_overview()
             elif kind == "overview":
                 pending = value.get("pending", 0)
@@ -1193,6 +1267,15 @@ class Workspace(tk.Tk):
         self.after(60, self._drain_messages)
 
     def close(self):
+        editors = [child for child in self.winfo_children()
+                   if isinstance(child, tk.Toplevel) and hasattr(child, "initial_data")]
+        if any(editor.saving for editor in editors):
+            messagebox.showinfo(APP_NAME, "脚本或工单正在保存，请稍候再退出。", parent=self)
+            return
+        dirty = [editor for editor in editors if editor.data() != editor.initial_data]
+        if dirty and not messagebox.askyesno(APP_NAME, f"有 {len(dirty)} 个脚本或工单窗口尚未保存修改。确定放弃这些修改并退出？", parent=self):
+            dirty[0].lift()
+            return
         self.stop_event.set()
         self.scan_stop.set()
         self.batch_stop.set()
@@ -1207,14 +1290,20 @@ if __name__ == "__main__":
     parser.add_argument("--no-auto-sync", action="store_true")
     parser.add_argument("--smoke-test", type=Path)
     parser.add_argument("--player-smoke-test", type=Path)
+    parser.add_argument("--collaboration-smoke-test", type=Path)
     arguments = parser.parse_args()
-    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test and not arguments.player_smoke_test)
-    if arguments.player_smoke_test:
+    if arguments.collaboration_smoke_test and not arguments.data_dir:
+        parser.error("--collaboration-smoke-test requires an isolated --data-dir")
+    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test and not arguments.player_smoke_test and not arguments.collaboration_smoke_test)
+    if arguments.collaboration_smoke_test:
+        from collaboration_smoke import run_smoke
+        run_smoke(app, arguments.collaboration_smoke_test)
+    elif arguments.player_smoke_test:
         from player_smoke import run_smoke
         run_smoke(app, arguments.player_smoke_test)
     elif arguments.smoke_test:
         def finish_smoke():
-            report = dict(version=APP_VERSION, ffmpeg=_ffmpeg(), mpv=str(app.player.mpv or ""), sqlite=str(app.service.db_path), window=[app.winfo_width(), app.winfo_height()])
+            report = dict(version=APP_VERSION, ffmpeg=_ffmpeg(), mpv=str(app.player.mpv or ""), dnd=app.dnd_version, sqlite=str(app.service.db_path), window=[app.winfo_width(), app.winfo_height()])
             arguments.smoke_test.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             app.close()
         app.after(1200, finish_smoke)

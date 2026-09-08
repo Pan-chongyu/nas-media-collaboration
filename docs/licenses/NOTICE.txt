@@ -1,4 +1,10 @@
-This installer redistributes unmodified standalone media tools.
+This installer redistributes unmodified standalone media tools and a native file drag component.
+
+tkinterdnd2 0.4.3 (MIT) and bundled tkdnd 2.9.4
+Project: https://github.com/Eliav2/tkinterdnd2
+TkDND project: https://github.com/petasis/tkdnd
+See tkinterdnd2-LICENSE.txt and tkdnd-LICENSE.txt.
+The native drag library is loaded by the desktop client on each user's PC.
 
 mpv v0.41.0-1023-g69e63f425 (Windows x86_64 build 20260903)
 Project: https://mpv.io/

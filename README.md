@@ -1,6 +1,6 @@
 # 素材协作
 
-局域网 NAS 素材整理 Windows 桌面端，当前版本为 `0.3.2`。各台电脑安装并运行客户端，NAS 仅提供 SMB 文件共享，不需要部署服务器程序。
+局域网 NAS 素材整理 Windows 桌面端，当前版本为 `0.4.0`。各台电脑安装并运行客户端，NAS 仅提供 SMB 文件共享，不需要部署服务器程序。
 
 ## 当前能力
 
@@ -10,10 +10,21 @@
 - 使用 Pillow 和随安装包提供的 FFmpeg 生成真实图片、视频缩略图。本地缓存按文件路径、大小和修改时间失效，后台处理最多并发 2 个任务，支持批量生成和暂停。
 - 每个节点将索引变更写入自己的 NAS 事件目录，其他客户端定期接收。断网保留待发送事件，恢复后重试；重复事件不会重复入库，收到变更时重新检查素材实际状态。
 - 任务中心显示扫描、文件索引和缩略图处理的进度及结果。NAS 设置、手动同步、自动同步和安装包更新检查已接入。
+- 脚本管理支持正文、审核状态、绑定素材、搜索分页和归档恢复。工单支持要求说明、负责人、截止日期、状态流转与关联素材预览。
+- 脚本与工单随 NAS 事件同步，保留每次修改。多人同时编辑保留并行版本，比较后明确合并；陈旧编辑会提示并保留窗口中的草稿。
+- 素材卡片和列表支持 Windows 原生文件拖出，传递 NAS 原片路径。可拖入剪映 / Premiere Pro / After Effects 的素材或项目面板；具体接收行为与媒体格式取决于目标软件，尚未完成三个剪辑软件的逐一实机兼容验证。
 
 文件索引只接受当前素材根目录内的文件，不会复制或移动原始媒体。扫描不自动删除历史记录；文件删除、移动与重命名的完整协作流程尚待实现。
 
-工单、脚本绑定、语音转写、画面 OCR、代理视频、拖拽到剪映 / Premiere Pro / After Effects 和工程交换尚未实现。播放器组件随安装包提供，在各自电脑运行。当前的“打开素材”使用 Windows 默认关联程序，“复制路径”提供文件路径。工单和脚本页面只是后续模块入口。跨电脑分配任务、权限控制、日志压缩与共享快照也不包含在当前版本中。
+语音转写、画面 OCR、代理视频和剪辑工程交换尚未实现。播放器和原生拖拽组件随安装包提供，在各自电脑运行。权限控制、独占任务认领、自动分配处理任务、日志压缩与共享快照也不包含在当前版本中。
+
+## 脚本与工单
+
+在“设置”填写协作显示名。选中素材后点击“绑定脚本”，可以选择已有脚本或新建；点击“新建工单”会自动关联当前素材。编辑窗口的“关联素材”页签支持搜索全库、添加、移除和直接预览；正文尚未保存时切换到素材预览会保留编辑窗口。
+
+脚本状态为草稿、待审核、已定稿；工单状态为待处理、进行中、待审核、已完成、已取消。负责人是显示名，工单状态不构成权限或排他认领。归档只隐藏记录，勾选“含已归档”后可以恢复。
+
+存在多人并行修改时，列表会显示提醒。打开编辑器的“查看版本 / 处理更新”比较正文和素材绑定，选择一个版本或保留自己的草稿，检查后点击“确认合并保存”。历史版本继续保留。自动同步每 30 秒尝试一次，NAS 离线时可以保存到本机，连接恢复后同步；尚未保存的窗口草稿不会自动同步。
 
 ## 预览界面
 
@@ -55,7 +66,7 @@ python -m unittest discover -s tests -v
 
 ## 构建和发布
 
-构建需要 Python 3.13、FFmpeg、mpv 和 Inno Setup 6。`build.ps1` 调用 `tools/build_release.py`，从 `main.py` 读取版本；显式 `-Version` 必须与其一致。构建前安装 PyInstaller 6.22.2 和 Pillow 12.3.0。FFmpeg 默认从 `%LOCALAPPDATA%\Programs\ffmpeg\bin\ffmpeg.exe` 读取，也可设置 `FFMPEG_PATH`。mpv 可通过下面的脚本下载固定版本并验证 SHA-256，也可设置 `MPV_PATH` 指向已有文件。
+构建需要 Python 3.13、FFmpeg、mpv 和 Inno Setup 6。`build.ps1` 调用 `tools/build_release.py`，从 `main.py` 读取版本；显式 `-Version` 必须与其一致。构建前安装 PyInstaller 6.22.2、Pillow 12.3.0 和 tkinterdnd2 0.4.3。FFmpeg 默认从 `%LOCALAPPDATA%\Programs\ffmpeg\bin\ffmpeg.exe` 读取，也可设置 `FFMPEG_PATH`。mpv 可通过下面的脚本下载固定版本并验证 SHA-256，也可设置 `MPV_PATH` 指向已有文件。
 
 ```powershell
 python -m pip install -r requirements.txt PyInstaller==6.22.2
@@ -64,16 +75,16 @@ python tools/fetch_mpv.py
 python tools/run_frozen_smoke.py
 ```
 
-应用文件生成在 `build\0.3.2\dist\素材协作\`，安装包生成在 `dist\素材协作-0.3.2-setup.exe`。`-Output` 指定安装包输出目录。脚本搜索 PATH 中的 `iscc`、`%LOCALAPPDATA%\InnoSetup\ISCC.exe` 和 Inno Setup 6 的常见目录，也支持 `ISCC_PATH`。安装包是每用户安装，不要求管理员权限；更新保留本地配置、数据库和缓存。中文文件名通过 Python 传递，兼容 Windows PowerShell 5.1。构建中任一命令失败都会返回失败，不再误报构建成功。
+应用文件生成在 `build\0.4.0\dist\素材协作\`，安装包生成在 `dist\素材协作-0.4.0-setup.exe`。`-Output` 指定安装包输出目录。脚本搜索 PATH 中的 `iscc`、`%LOCALAPPDATA%\InnoSetup\ISCC.exe` 和 Inno Setup 6 的常见目录，也支持 `ISCC_PATH`。安装包是每用户安装，不要求管理员权限；更新保留本地配置、数据库和缓存。中文文件名通过 Python 传递，兼容 Windows PowerShell 5.1。构建中任一命令失败都会返回失败，不再误报构建成功。
 
 冻结版检查使用独立数据目录和裁剪后的 PATH，确认程序可以启动并找到随包组件。可传 `--exe <安装后的素材协作.exe>` 检查实际安装目录。最终用户仅需安装 setup.exe，不需要安装 Python、FFmpeg 或 mpv。
 
-`python tools/verify_installer.py --work-dir D:\CodexBuildCache\nas-media-collaboration` 会对同一个安装包执行隔离试装、逐文件校验、启动和真实播放器验证。该工具使用安装器内部验证参数，必须指定全新目录，不创建快捷方式或卸载注册项，不会关闭正在使用的客户端。普通双击安装和软件更新仍按正常安装流程运行。
+`python tools/verify_installer.py --work-dir D:\CodexBuildCache\nas-media-collaboration` 会对同一个安装包执行隔离试装、逐文件校验、启动、真实播放器和脚本工单操作验证。该工具使用安装器内部验证参数，必须指定全新目录，不创建快捷方式或卸载注册项，不会关闭正在使用的客户端。普通双击安装和软件更新仍按正常安装流程运行。
 
 验证本地安装包后，发布同一个文件，不重新编译：
 
 ```powershell
-.\build.ps1 -PublishOnly -NasPublishPath "\\SmartStorage\新媒体-137964276\软件库\素材协作" -ReleaseNotes "右侧内置播放器、进度拖动和全屏；完整安装包"
+.\build.ps1 -PublishOnly -NasPublishPath "\\SmartStorage\新媒体-137964276\软件库\素材协作" -ReleaseNotes "脚本、工单、素材绑定和版本同步；Windows 文件拖拽"
 ```
 
 发布先暂存安装包并校验 SHA-256，再放入发布目录，最后替换 `manifest.json`。同版本已有不同内容时拒绝覆盖，历史安装包保留。`-PublishOnly` 必须提供发布目录，且本地已存在当前版本安装包；不会运行依赖安装、清理构建目录或编译。省略 `-PublishOnly` 并提供发布目录则会完成构建后直接发布。
