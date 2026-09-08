@@ -1,4 +1,3 @@
 # 运行时依赖
 Pillow==12.3.0
-# 构建工具由 build.ps1 自动安装
-# pyinstaller==6.22.2
+# 构建电脑还需：python -m pip install PyInstaller==6.22.2

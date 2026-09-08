@@ -1,19 +1,43 @@
-from pathlib import Path
+"""Verify the frozen app with isolated data and no host media tools on PATH."""
+import argparse
 import json
-import shutil
+import os
+from pathlib import Path
+import re
 import subprocess
+import uuid
 
 root = Path(__file__).resolve().parents[1]
-out = root / "build" / "verification" / "frozen-smoke.json"
-data = root / "build" / "verification" / "frozen-data"
-out.unlink(missing_ok=True)
-shutil.rmtree(data, ignore_errors=True)
-exe = root / "build" / "0.3.0" / "dist" / "素材协作" / "素材协作.exe"
-result = subprocess.run([str(exe), "--data-dir", str(data), "--no-auto-sync", "--smoke-test", str(out)], cwd=exe.parent, timeout=30)
+version = re.search(r'^APP_VERSION = "([\d.]+)"', (root / "main.py").read_text(encoding="utf-8"), re.M).group(1)
+parser = argparse.ArgumentParser()
+parser.add_argument("--exe", type=Path, default=root / "build" / version / "dist" / "素材协作" / "素材协作.exe")
+parser.add_argument("--player", action="store_true")
+arguments = parser.parse_args()
+exe = arguments.exe.resolve()
+verification = root / "build" / "verification" / ("frozen-" + uuid.uuid4().hex)
+verification.mkdir(parents=True)
+out = verification / "smoke.json"
+data = verification / "data"
+environment = dict(os.environ)
+environment.update(PATH=str(Path(os.environ["SystemRoot"]) / "System32"),
+                   LOCALAPPDATA=str(verification / "local"), APPDATA=str(verification / "roaming"))
+environment.pop("MPV_PATH", None)
+environment.pop("FFMPEG_PATH", None)
+mode = "--player-smoke-test" if arguments.player else "--smoke-test"
+result = subprocess.run([str(exe), "--data-dir", str(data), "--no-auto-sync", mode, str(out)],
+                        cwd=verification, timeout=60, env=environment,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 if result.returncode:
     raise SystemExit(result.returncode)
 report = json.loads(out.read_text(encoding="utf-8"))
-assert report["version"] == "0.3.0"
-assert Path(report["ffmpeg"]).is_file()
-assert Path(report["sqlite"]).is_file()
+if arguments.player:
+    assert report["ok"] and report["closed"], report
+    assert len(report["checks"]) == 7, report
+else:
+    assert report["version"] == version, report
+    assert Path(report["sqlite"]).is_file(), report
+    assert Path(report["ffmpeg"]).is_relative_to(exe.parent), report
+    assert Path(report["ffmpeg"]).is_file(), report
+assert Path(report["mpv"]).is_file(), report
+assert Path(report["mpv"]).is_relative_to(exe.parent), report
 print(json.dumps(report, ensure_ascii=False, indent=2))

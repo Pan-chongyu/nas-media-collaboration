@@ -1,0 +1,18 @@
+This installer redistributes unmodified standalone media tools.
+
+mpv v0.41.0-1023-g69e63f425 (Windows x86_64 build 20260903)
+Project: https://mpv.io/
+Source: https://github.com/mpv-player/mpv/tree/69e63f425
+Build recipes and dependency sources: https://github.com/shinchiro/mpv-winbuild-cmake
+Binary archive: https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260903
+Archive SHA-256: 418dbfb5feb851cbed33d6c05d8481ba71802621bfd6efe8974522b28d42ac97
+License: GNU GPL v3 or later; see mpv-Copyright.txt and GPL-3.0.txt.
+
+FFmpeg 8.1.2 essentials build (www.gyan.dev)
+Project and source: https://ffmpeg.org/download.html
+Build source / release information: https://www.gyan.dev/ffmpeg/builds/
+License for this --enable-gpl --enable-version3 build: GNU GPL v3 or later.
+See FFmpeg-LICENSE.txt and GPL-3.0.txt for notices and terms.
+
+These processes run on each user's PC. They are distributed with their
+copyright and license notices; they are not executed by the NAS.

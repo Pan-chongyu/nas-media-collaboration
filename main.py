@@ -107,6 +107,10 @@ class Workspace(tk.Tk):
         self.stop_event = threading.Event()
         self.player = MediaPlayer()
         self.player_job = None
+        self._player_dragging = False
+        self._player_seek_job = None
+        self._fullscreen = None
+        self._player_error = ""
         self.scan_stop = threading.Event()
         self.batch_stop = threading.Event()
         self.scanning = self.syncing = self.batching = False
@@ -188,6 +192,7 @@ class Workspace(tk.Tk):
         self.bind("<Control-c>", lambda _event: self._copy_path() if self.active_page == "素材库" else None)
 
     def show_page(self, name: str):
+        self._stop_player()
         self.active_page = name
         self.query_generation += 1
         self.image_refs.clear()
@@ -248,8 +253,13 @@ class Workspace(tk.Tk):
         preview = tk.Frame(work, width=252, bg=BG)
         preview.pack(side="right", fill="y", padx=(16, 0))
         preview.pack_propagate(False)
-        self.preview_image_label = tk.Label(preview, bg="#e7ecea", fg=MUTED, width=240, height=135, compound="center")
-        self.preview_image_label.pack(fill="x", pady=(0, 14))
+        self.player_surface = tk.Frame(preview, bg="#121916", height=140)
+        self.player_surface.pack(fill="x", pady=(0, 14))
+        self.player_surface.pack_propagate(False)
+        self.preview_image_label = tk.Label(self.player_surface, bg="#e7ecea", fg=MUTED, compound="center")
+        self.preview_image_label.place(x=0, y=0, relwidth=1, relheight=1)
+        self.player_surface.bind("<Configure>", self._resize_player)
+        self.preview_image_label.bind("<Double-Button-1>", lambda _event: self._toggle_player())
         player_bar = ttk.Frame(preview)
         player_bar.pack(fill="x", pady=(0, 10))
         self.play_button = ttk.Button(player_bar, text="▶ 播放", command=self._toggle_player)
@@ -263,6 +273,8 @@ class Workspace(tk.Tk):
                                                command=self._player_progress_changed)
         self.player_progress_scale.pack(fill="x", pady=(0, 4))
         self.player_progress_scale.state(["disabled"])
+        self.player_progress_scale.bind("<ButtonPress-1>", self._player_drag_start)
+        self.player_progress_scale.bind("<ButtonRelease-1>", self._player_drag_end)
         self.player_elapsed = ttk.Label(preview, text="00:00 / --:--", style="Muted.TLabel")
         self.player_elapsed.pack(anchor="e", pady=(0, 4))
         self.player_volume = tk.IntVar(value=80)
@@ -369,7 +381,7 @@ class Workspace(tk.Tk):
             self.columns, self.card_width = columns, width
             if self._resize_after:
                 self.after_cancel(self._resize_after)
-            self._resize_after = self.after(120, self._render_current)
+            self._resize_after = self.after_idle(self._render_current)
 
     def _set_view(self, mode):
         self.view_mode = mode
@@ -401,6 +413,7 @@ class Workspace(tk.Tk):
             child.destroy()
         self.asset_tree.delete(*self.asset_tree.get_children())
         if self.selected_id not in {item["asset_id"] for item in self.records}:
+            self._stop_player()
             self.selected_id = ""
             self.preview_title.configure(text="尚未选择素材")
             self.preview_meta.configure(text="")
@@ -507,8 +520,9 @@ class Workspace(tk.Tk):
         item = next((item for item in self.records if item["asset_id"] == identity), None)
         if not item:
             return
+        if self.selected_id != identity:
+            self._stop_player()
         self.selected_id = identity
-        self._stop_player()
         for key, card in self.card_widgets.items():
             card.configure(highlightbackground=ACCENT if key == identity else "#dde2df")
         self.preview_title.configure(text=self._fit_text(item["name"], 240, 2, self.preview_font))
@@ -553,55 +567,105 @@ class Workspace(tk.Tk):
             self._status.set("请选择视频或音频素材")
             return
         if self.player.playing:
-            self.player.pause()
-            self.play_button.configure(text="▶ 播放")
+            if self.player.state.ended:
+                self.player.seek(0)
+                if self.player.state.paused:
+                    self.player.pause()
+            else:
+                self.player.pause()
             return
         try:
-            self.player.open(item["path"])
-            self.play_button.configure(text="Ⅱ 暂停")
-            self.player_hint.configure(text=f"正在播放：{item['name']}")
-            self.after(500, self._player_tick)
+            self._player_error = ""
+            self.preview_image_label.place_forget()
+            self.player_surface.update_idletasks()
+            self.player.set_volume(self.player_volume.get())
+            self.player.embed(item["path"], self.player_surface.winfo_id())
+            self._resize_player()
+            self.player_hint.configure(text="正在加载：" + item["name"])
+            if self.player_job:
+                self.after_cancel(self.player_job)
+            self.player_job = self.after(100, self._player_tick)
         except PlayerError as exc:
+            self.preview_image_label.place(x=0, y=0, relwidth=1, relheight=1)
             self._status.set(str(exc))
 
     def _player_tick(self):
-        elapsed = self.player.elapsed
-        self.player_progress.set(min(100.0, elapsed / max(1.0, self._player_duration_seconds()) * 100.0))
-        if hasattr(self, "player_elapsed"):
-            self.player_elapsed.configure(text=f"{self._format_clock(elapsed)} / {self._selected_duration()}")
-        if self.player.playing:
-            self.after(500, self._player_tick)
-        else:
-            self.play_button.configure(text="▶ 播放")
+        self.player_job = None
+        if self.active_page != "素材库" or self.stop_event.is_set():
+            return
+        for event in self.player.drain_events():
+            if event == "nas-exit-fullscreen":
+                self._leave_fullscreen()
+            elif event == "nas-toggle-fullscreen":
+                self._fullscreen_player()
+        state = self.player.state
+        if not self._player_dragging:
+            self.player_progress.set(min(100.0, state.elapsed / state.duration * 100.0) if state.duration else 0)
+        self.player_progress_scale.state(["!disabled"] if state.active and state.duration > 0 else ["disabled"])
+        total = self._format_clock(state.duration) if state.duration else "--:--"
+        self.player_elapsed.configure(text=f"{self._format_clock(state.elapsed)} / {total}")
+        label = "↻ 重播" if state.ended else "▶ 继续" if state.paused else "Ⅱ 暂停" if state.active else "▶ 播放"
+        self.play_button.configure(text=label)
+        hint = "播放完毕" if state.ended else "正在加载或缓冲…" if state.loading else "已暂停" if state.paused else "正在播放" if state.active else "选择视频或音频后播放"
+        self.player_hint.configure(text=hint)
+        if self._fullscreen:
+            self.fullscreen_play.configure(text=label)
+            self.fullscreen_time.configure(text=self.player_elapsed.cget("text"))
+        if state.error and state.error != self._player_error:
+            self._player_error = state.error
+            self._status.set(state.error)
+            self.player_hint.configure(text=state.error)
+            self._leave_fullscreen()
+            self.preview_image_label.place(x=0, y=0, relwidth=1, relheight=1)
+        if state.active:
+            self.player_job = self.after(200, self._player_tick)
 
     def _format_clock(self, seconds):
         seconds = max(0, int(seconds))
+        if seconds >= 3600:
+            return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
         return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
-    def _selected_duration(self):
-        item = self._selected()
-        value = str(item.get("duration", "")) if item else ""
-        return value[-5:] if len(value) >= 5 else "--:--"
+    def _player_drag_start(self, _event=None):
+        self._player_dragging = True
+        if self._player_seek_job:
+            self.after_cancel(self._player_seek_job)
+            self._player_seek_job = None
 
-    def _player_duration_seconds(self):
-        value = self._selected_duration()
-        try:
-            minutes, seconds = value.split(":")[-2:]
-            return int(minutes) * 60 + int(seconds)
-        except (ValueError, AttributeError):
-            return 0
+    def _player_drag_end(self, _event=None):
+        self._player_dragging = False
+        self._commit_player_seek()
 
     def _player_progress_changed(self, _value=None):
-        # ffplay is intentionally kept local and isolated; the slider reflects
-        # elapsed playback without sending unsafe filesystem operations.
-        return None
+        if self._player_dragging:
+            return
+        if self._player_seek_job:
+            self.after_cancel(self._player_seek_job)
+        self._player_seek_job = self.after(120, self._commit_player_seek)
+
+    def _commit_player_seek(self):
+        if self._player_seek_job:
+            self.after_cancel(self._player_seek_job)
+            self._player_seek_job = None
+        self.player.seek(self.player_progress.get() / 100 * self.player.state.duration)
 
     def _stop_player(self):
+        self._leave_fullscreen()
+        if self.player_job:
+            self.after_cancel(self.player_job)
+            self.player_job = None
+        if self._player_seek_job:
+            self.after_cancel(self._player_seek_job)
+            self._player_seek_job = None
+        self._player_dragging = False
         self.player.stop()
-        if hasattr(self, "play_button"):
+        if hasattr(self, "play_button") and self.play_button.winfo_exists():
             self.play_button.configure(text="▶ 播放")
             self.player_progress.set(0)
+            self.player_progress_scale.state(["disabled"])
             self.player_elapsed.configure(text="00:00 / --:--")
+            self.player_hint.configure(text="选择视频或音频后播放")
+            self.preview_image_label.place(x=0, y=0, relwidth=1, relheight=1)
 
     def _set_player_volume(self, value):
         try:
@@ -609,11 +673,52 @@ class Workspace(tk.Tk):
         except (TypeError, ValueError):
             pass
 
+    def _resize_player(self, _event=None):
+        surface = self.fullscreen_surface if self._fullscreen else getattr(self, "player_surface", None)
+        if surface and surface.winfo_exists():
+            self.player.attach(surface.winfo_id(), surface.winfo_width(), surface.winfo_height())
+
     def _fullscreen_player(self):
-        item = self._selected()
-        if item and item["media_type"] in {"video", "audio"}:
-            self.player.open(item["path"])
-            self._status.set("播放器已打开，可使用 ffplay 全屏快捷键")
+        if self._fullscreen:
+            self._leave_fullscreen()
+            return
+        if not self.player.playing:
+            self._toggle_player()
+        if not self.player.playing:
+            return
+        window = tk.Toplevel(self)
+        self._fullscreen = window
+        window.title("素材协作 · 全屏播放")
+        window.configure(bg="#121916")
+        window.attributes("-fullscreen", True)
+        window.protocol("WM_DELETE_WINDOW", self._leave_fullscreen)
+        window.bind("<Escape>", lambda _event: self._leave_fullscreen())
+        window.bind("<space>", lambda _event: self._toggle_player())
+        controls = ttk.Frame(window, padding=10)
+        controls.pack(side="bottom", fill="x")
+        self.fullscreen_play = ttk.Button(controls, text=self.play_button.cget("text"), command=self._toggle_player)
+        self.fullscreen_play.pack(side="left")
+        self.fullscreen_time = ttk.Label(controls, text=self.player_elapsed.cget("text"))
+        self.fullscreen_time.pack(side="left", padx=12)
+        ttk.Button(controls, text="退出全屏 Esc", command=self._leave_fullscreen).pack(side="right")
+        scale = ttk.Scale(controls, from_=0, to=100, variable=self.player_progress, command=self._player_progress_changed)
+        scale.pack(side="left", fill="x", expand=True, padx=12)
+        scale.bind("<ButtonPress-1>", self._player_drag_start)
+        scale.bind("<ButtonRelease-1>", self._player_drag_end)
+        self.fullscreen_surface = tk.Frame(window, bg="#121916")
+        self.fullscreen_surface.pack(fill="both", expand=True)
+        self.fullscreen_surface.bind("<Configure>", self._resize_player)
+        window.update_idletasks()
+        self._resize_player()
+        window.focus_force()
+
+    def _leave_fullscreen(self):
+        window = self._fullscreen
+        if not window:
+            return
+        self._fullscreen = None
+        self._resize_player()
+        window.destroy()
 
     def _retry_thumbnail(self):
         item = self._selected()
@@ -915,6 +1020,7 @@ class Workspace(tk.Tk):
         self.stop_event.set()
         self.scan_stop.set()
         self.batch_stop.set()
+        self._stop_player()
         self.player.close()
         self.destroy()
 
@@ -924,11 +1030,15 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--no-auto-sync", action="store_true")
     parser.add_argument("--smoke-test", type=Path)
+    parser.add_argument("--player-smoke-test", type=Path)
     arguments = parser.parse_args()
-    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test)
-    if arguments.smoke_test:
+    app = Workspace(data_dir=arguments.data_dir, auto_sync=not arguments.no_auto_sync and not arguments.smoke_test and not arguments.player_smoke_test)
+    if arguments.player_smoke_test:
+        from player_smoke import run_smoke
+        run_smoke(app, arguments.player_smoke_test)
+    elif arguments.smoke_test:
         def finish_smoke():
-            report = dict(version=APP_VERSION, ffmpeg=_ffmpeg(), sqlite=str(app.service.db_path), window=[app.winfo_width(), app.winfo_height()])
+            report = dict(version=APP_VERSION, ffmpeg=_ffmpeg(), mpv=str(app.player.mpv or ""), sqlite=str(app.service.db_path), window=[app.winfo_width(), app.winfo_height()])
             arguments.smoke_test.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             app.close()
         app.after(1200, finish_smoke)
